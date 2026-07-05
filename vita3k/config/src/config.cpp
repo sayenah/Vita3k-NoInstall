@@ -353,6 +353,8 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->default_str("eboot.bin")->group("Input");
     input->add_option("--installed-path,-r", command_line.run_app_path, "Path to the installed app to run")
         ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
+    input->add_option("--bundle", command_line.bundle_path, "Path to a Game Bundle directory to mount and boot directly (dev/testing)")
+        ->default_str({})->group("Input");
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
         ->default_str({})->group("Input");
     input->add_option("--deleted-id,-d", command_line.delete_title_id, "Title ID of installed app to delete")

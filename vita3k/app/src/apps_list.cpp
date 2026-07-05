@@ -323,7 +323,7 @@ void save_apps_cache(EmuEnvState &emuenv) {
 AppEntry read_app_info(EmuEnvState &emuenv, const std::string &title_id) {
     sfo::SfoAppInfo info;
     vfs::FileBuffer param;
-    if (vfs::read_app_file(param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo")) {
+    if (vfs::read_app_file(emuenv.io, param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo")) {
         sfo::get_param_info(info, param, emuenv.cfg.sys_lang);
     } else {
         info.app_title_id = title_id;

@@ -33,6 +33,8 @@ struct Config {
     std::optional<std::string> pkg_path;
     std::optional<std::string> pkg_zrif;
     std::optional<std::string> pup_path;
+    // Dev/testing: path to a Game Bundle directory to mount and boot directly (P0 directory backend).
+    std::optional<fs::path> bundle_path;
     std::optional<bool> system_music;
 
     // Setting not present in the YAML file

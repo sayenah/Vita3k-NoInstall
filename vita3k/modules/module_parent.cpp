@@ -23,6 +23,7 @@
 
 #include <cpu/functions.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/device.h>
 #include <io/state.h>
 #include <io/vfs.h>
@@ -287,10 +288,14 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
 
     vfs::FileBuffer module_buffer;
     bool res;
-    if (device == VitaIoDevice::app0)
-        res = vfs::read_app_file(module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
-    else
+    // Serve app0: modules from a mounted Game Bundle when covered; otherwise read from the host FS.
+    if (const auto handled = bundle::try_read_ux0_file(emuenv.io, translated_module_path, module_buffer)) {
+        res = *handled;
+    } else if (device == VitaIoDevice::app0) {
+        res = vfs::read_app_file(emuenv.io, module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
+    } else {
         res = vfs::read_file(device, module_buffer, emuenv.vita_fs_path, translated_module_path);
+    }
     if (!res) {
         LOG_ERROR("Failed to read module file {}", module_path);
         return SCE_ERROR_ERRNO_ENOENT;

@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <io/bundle.h>
 #include <io/device.h>
 #include <io/functions.h>
 #include <io/io.h>
@@ -69,8 +70,12 @@ bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &vita_
     return fs_utils::read_data(host_file_path, buf);
 }
 
-bool read_app_file(FileBuffer &buf, const fs::path &vita_fs_path, const std::string &app_path, const fs::path &vfs_file_path) {
-    return read_file(VitaIoDevice::ux0, buf, vita_fs_path, fs::path("app") / app_path / vfs_file_path);
+bool read_app_file(const IOState &io, FileBuffer &buf, const fs::path &vita_fs_path, const std::string &app_path, const fs::path &vfs_file_path) {
+    const auto ux0_rel = fs::path("app") / app_path / vfs_file_path;
+    // Serve from a mounted Game Bundle if this app file is covered; else read from the host FS.
+    if (const auto handled = bundle::try_read_ux0_file(io, ux0_rel, buf))
+        return *handled;
+    return read_file(VitaIoDevice::ux0, buf, vita_fs_path, ux0_rel);
 }
 
 SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vfs_path, const fs::path &vita_fs_path) {
@@ -148,6 +153,8 @@ void io_deinit(IOState &io) {
     io.app_path.clear();
 
     io.cachemap.clear();
+
+    io.mount.reset();
 
     {
         std::lock_guard<std::mutex> lock(io.overlay_mutex);
@@ -339,6 +346,23 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
+    // Serve reads from a mounted Game Bundle (app0:/addcont0:). The mount is read-only: any write
+    // intent is rejected with EROFS, matching a real read-only PFS app mount.
+    if (io.mount) {
+        if (const auto key = io.mount->map_ux0_path(translated_path)) {
+            if (flags & (SCE_O_WRONLY | SCE_O_APPEND | SCE_O_TRUNC | SCE_O_CREAT))
+                return IO_ERROR(SCE_ERROR_ERRNO_EROFS);
+            auto reader = io.mount->backend->open(*key);
+            if (!reader)
+                return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+            const auto normalized_path = device::construct_normalized_path(device, translated_path);
+            const auto fd = io.next_fd++;
+            io.std_files.emplace(fd, FileStats{ path, normalized_path, std::move(reader) });
+            LOG_TRACE_IF(log_file_op, "{}: Opening bundle file {} ({} -> {}), fd: {}", export_name, path, translated_path, *key, log_hex(fd));
+            return fd;
+        }
+    }
+
     auto system_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
     if (fs::is_directory(system_path)) {
         LOG_ERROR("Cannot open directory: {}", system_path);
@@ -508,6 +532,11 @@ SceOff tell_file(IOState &io, const SceUID fd, const char *export_name) {
     return std_file->second.tell();
 }
 
+// Fill a SceIoStat from bundle metadata (size + kind). Bundles carry no per-file host timestamps,
+// so all three times are reported as the RTC epoch. Defined after stat_file() so its POSIX
+// st_*time macro #undef does not leak forward onto stat_file()'s struct stat64 access.
+static void fill_bundle_stat(SceIoStat *statp, uint64_t size, bool is_dir);
+
 int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &vita_fs_path, const char *export_name, const SceUID fd) {
     assert(statp != nullptr);
 
@@ -523,6 +552,18 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
         }
 
         const auto translated_path = translate_path(file, device, io.device_paths);
+
+        // Stat entries served from a mounted Game Bundle (app0:/addcont0:).
+        if (io.mount) {
+            if (const auto key = io.mount->map_ux0_path(translated_path)) {
+                const auto st = io.mount->backend->stat(*key);
+                if (!st)
+                    return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+                fill_bundle_stat(statp, st->size, st->is_dir);
+                return 0;
+            }
+        }
+
         file_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
 
         if (!fs::exists(file_path)) {
@@ -553,6 +594,12 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
         const auto fd_file = io.std_files.find(fd);
         if (fd_file == io.std_files.end())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+        // Bundle-backed fds have no host path; stat from the reader's size instead.
+        if (fd_file->second.is_bundle_file()) {
+            fill_bundle_stat(statp, fd_file->second.get_bundle_reader()->size(), false);
+            return 0;
+        }
 
         file_path = fd_file->second.get_system_location();
         LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting fd: {}", export_name, log_hex(fd));
@@ -604,6 +651,28 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
     return 0;
 }
 
+static void fill_bundle_stat(SceIoStat *statp, const uint64_t size, const bool is_dir) {
+    statp->st_mode = SCE_S_IRUSR | SCE_S_IRGRP | SCE_S_IROTH;
+    if (is_dir) {
+        statp->st_attr = SCE_SO_IFDIR;
+        statp->st_mode |= SCE_S_IFDIR | SCE_S_IXUSR | SCE_S_IXGRP | SCE_S_IXOTH;
+    } else {
+        statp->st_size = static_cast<SceOff>(size);
+        statp->st_attr = SCE_SO_IFREG;
+        statp->st_mode |= SCE_S_IFREG;
+    }
+#ifndef _WIN32
+    // <sys/stat.h> redefines these as macros on POSIX; stat_file() above already #undef'd them for
+    // the rest of this TU, so the SceIoStat members resolve here. Kept for self-containment.
+#undef st_atime
+#undef st_mtime
+#undef st_ctime
+#endif
+    __RtcTicksToPspTime(&statp->st_atime, RTC_OFFSET);
+    __RtcTicksToPspTime(&statp->st_mtime, RTC_OFFSET);
+    __RtcTicksToPspTime(&statp->st_ctime, RTC_OFFSET);
+}
+
 int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::path &vita_fs_path, const char *export_name) {
     assert(statp != nullptr);
     memset(statp, '\0', sizeof(SceIoStat));
@@ -640,6 +709,10 @@ int remove_file(IOState &io, const char *file, const fs::path &vita_fs_path, con
         LOG_ERROR("Cannot translate path: {}", translated_path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
+
+    // A mounted Game Bundle is read-only: reject removal under app0:/addcont0:.
+    if (io.mount && io.mount->map_ux0_path(translated_path))
+        return IO_ERROR(SCE_ERROR_ERRNO_EROFS);
 
     const auto emulated_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
     if (!fs::exists(emulated_path) || fs::is_directory(emulated_path)) {
@@ -679,6 +752,10 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
+    // A mounted Game Bundle is read-only: reject renames touching app0:/addcont0: on either side.
+    if (io.mount && (io.mount->map_ux0_path(translated_old_path) || io.mount->map_ux0_path(translated_new_path)))
+        return IO_ERROR(SCE_ERROR_ERRNO_EROFS);
+
     const auto emulated_old_path = device::construct_emulated_path(device, translated_old_path, vita_fs_path, io.redirect_stdio);
     if (!fs::exists(emulated_old_path)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_old_path, old_name);
@@ -705,6 +782,22 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, con
     auto device = device::get_device(path);
     auto device_for_icase = device;
     const auto translated_path = translate_path(path, device, io.device_paths);
+
+    // List directories served from a mounted Game Bundle (app0:/addcont0:).
+    if (io.mount) {
+        if (const auto key = io.mount->map_ux0_path(translated_path)) {
+            const auto st = io.mount->backend->stat(*key);
+            if (!st || !st->is_dir)
+                return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+            auto dir_reader = std::make_shared<bundle::DirReader>();
+            dir_reader->entries = io.mount->backend->list_dir(*key);
+            const auto normalized = device::construct_normalized_path(device, translated_path);
+            const auto fd = io.next_fd++;
+            io.dir_entries.emplace(fd, DirStats{ path, normalized, std::move(dir_reader) });
+            LOG_TRACE_IF(log_file_op, "{}: Opening bundle dir {} ({} -> {}), fd: {}", export_name, path, translated_path, *key, log_hex(fd));
+            return fd;
+        }
+    }
 
     auto dir_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio) / "";
     if (!fs::exists(dir_path)) {
@@ -759,6 +852,19 @@ SceUID read_dir(IOState &io, const SceUID fd, SceIoDirent *dent, const fs::path 
         if (!dir->second.is_directory())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
+        // Directory served from a mounted Game Bundle: walk the cached entry list.
+        if (dir->second.is_bundle_dir()) {
+            auto &reader = *dir->second.get_bundle_dir();
+            if (reader.cursor >= reader.entries.size())
+                return 0; // end of directory
+            const auto &ent = reader.entries[reader.cursor++];
+            strncpy(dent->d_name, ent.name.c_str(), sizeof(dent->d_name));
+            const auto entry_vita_path = std::string(dir->second.get_vita_loc()) + '/' + ent.name;
+            if (stat_file(io, entry_vita_path.c_str(), &dent->d_stat, vita_fs_path, export_name) < 0)
+                return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+            return 1;
+        }
+
         const auto d = dir->second.get_dir_ptr();
         if (!d)
             return 0;
@@ -803,6 +909,10 @@ int create_dir(IOState &io, const char *dir, int mode, const fs::path &vita_fs_p
         LOG_ERROR("Failed to translate path: {}", dir);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
+
+    // A mounted Game Bundle is read-only: reject directory creation under app0:/addcont0:.
+    if (io.mount && io.mount->map_ux0_path(translated_path))
+        return IO_ERROR(SCE_ERROR_ERRNO_EROFS);
 
     const auto emulated_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
     if (recursive)
@@ -850,6 +960,10 @@ int remove_dir(IOState &io, const char *dir, const fs::path &vita_fs_path, const
         LOG_ERROR("Cannot translate path: {}", dir);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
+
+    // A mounted Game Bundle is read-only: reject directory removal under app0:/addcont0:.
+    if (io.mount && io.mount->map_ux0_path(translated_path))
+        return IO_ERROR(SCE_ERROR_ERRNO_EROFS);
 
     LOG_TRACE_IF(log_file_op, "{}: Removing dir {} ({})", export_name, dir, device::construct_normalized_path(device, translated_path));
 
