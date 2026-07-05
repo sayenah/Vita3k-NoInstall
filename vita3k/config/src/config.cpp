@@ -148,6 +148,8 @@ static void check_members(Config &self, const Config &rhs) {
         self.content_path = rhs.content_path;
     if (rhs.run_app_path.has_value())
         self.run_app_path = rhs.run_app_path;
+    if (rhs.bundle_path.has_value())
+        self.bundle_path = rhs.bundle_path;
     if (rhs.recompile_shader_path.has_value())
         self.recompile_shader_path = rhs.recompile_shader_path;
     if (rhs.delete_title_id.has_value())
