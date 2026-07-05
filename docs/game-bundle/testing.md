@@ -93,6 +93,32 @@ macOS (run the binary inside the .app so you can pass args):
 It should mount the folder, register the title, and boot straight into the game — no entry in the
 normal games list, no copy under `ux0/app`.
 
+### Android (adb / ES-DE)
+
+The `.Emulator` activity accepts a `bundle_path` extra (or a `VIEW` `file://` data URI) and boots it
+directly. It's already exported and self-initializes native, so this works from a cold start.
+
+Prep on the device:
+
+- Install the fork APK (`android/app.apk`), launch it once so firmware is installed and the game's
+  license exists (or reuse your existing Vita3K-Android data folder).
+- Put a bundle folder on storage, e.g. `/sdcard/bundles/MyGame/` with `app/` + `vita3k_bundle.json`
+  (same layout as above). An installed Android game at `<storage>/ux0/app/<TITLEID>` is a decrypted
+  tree you can copy. (The app holds all-files access, so native reads the plain path directly.)
+
+Launch:
+
+```
+adb shell am start -n org.vita3k.emulator/org.vita3k.emulator.Emulator \
+  -e bundle_path /sdcard/bundles/MyGame
+```
+
+- Add `-e title_id PCSE00123` if you want. A debug APK's package is `org.vita3k.emulator.debug`
+  (check with `adb shell pm list packages | grep vita3k`).
+- Make sure the emulator isn't already mid-game — the fresh-launch path is what reads the bundle.
+- **ES-DE:** point the Vita3K launch command at `org.vita3k.emulator/.Emulator` with
+  `-e bundle_path <ROM path>`.
+
 ## 5. P0 acceptance checks
 
 - [ ] **Boots** from the folder; the game runs. Delete/rename `BundleDir` afterwards — saves under

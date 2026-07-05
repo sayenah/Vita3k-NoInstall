@@ -70,6 +70,9 @@ public class Emulator extends SDLActivity
     private static final long IME_RESTORE_DELAY_MS = 250L;
     public static final String EXTRA_TITLE_ID = "title_id";
     public static final String EXTRA_GAME_TITLE = "game_title";
+    // Path to a Game Bundle directory to mount and boot directly (dev/testing + external launchers
+    // such as ES-DE). Also accepted as a VIEW data URI (file:// path). See docs/game-bundle/.
+    public static final String EXTRA_BUNDLE_PATH = "bundle_path";
     private static final String APP_RESTART_PARAMETERS = "AppStartParameters";
     static final int FILE_DIALOG_CODE = 545;
     static final int FOLDER_DIALOG_CODE = 546;
@@ -174,6 +177,18 @@ public class Emulator extends SDLActivity
         String[] args = intent.getStringArrayExtra(APP_RESTART_PARAMETERS);
         if (args != null && args.length > 0)
             return args;
+
+        // Boot directly from a Game Bundle directory (dev/testing + external launchers like ES-DE).
+        // The path comes from the bundle_path extra or a VIEW data URI (file:// path).
+        String bundlePath = intent.getStringExtra(EXTRA_BUNDLE_PATH);
+        if ((bundlePath == null || bundlePath.isEmpty()) && intent.getData() != null)
+            bundlePath = intent.getData().getPath();
+        if (bundlePath != null && !bundlePath.isEmpty()) {
+            String bundleTitleId = intent.getStringExtra(EXTRA_TITLE_ID);
+            if (bundleTitleId != null && !bundleTitleId.isEmpty())
+                return new String[]{"--bundle", bundlePath, "-r", bundleTitleId};
+            return new String[]{"--bundle", bundlePath};
+        }
 
         // Check for title_id from MainActivity launch
         String titleId = intent.getStringExtra(EXTRA_TITLE_ID);

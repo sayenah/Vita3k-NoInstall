@@ -25,6 +25,7 @@
 #include <dialog/state.h>
 #include <ime/functions.h>
 #include <ime/keyboard.h>
+#include <io/bundle.h>
 #include <io/state.h>
 #include <motion/event_handler.h>
 #include <motion/functions.h>
@@ -236,15 +237,17 @@ extern "C" {
 // argv is populated from Emulator.getArguments(), e.g. {"-r", "PCSE00000"}.
 SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
     std::string title_id;
+    std::string bundle_dir;
     for (int i = 0; i < argc; i++) {
-        if (std::string(argv[i]) == "-r" && i + 1 < argc) {
+        const std::string arg = argv[i];
+        if (arg == "-r" && i + 1 < argc)
             title_id = argv[i + 1];
-            break;
-        }
+        else if (arg == "--bundle" && i + 1 < argc)
+            bundle_dir = argv[i + 1];
     }
 
-    if (title_id.empty()) {
-        LOG_ERROR("No title ID provided");
+    if (title_id.empty() && bundle_dir.empty()) {
+        LOG_ERROR("No title ID or bundle provided");
         return -1;
     }
 
@@ -291,6 +294,41 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
         jni_env->DeleteLocalRef(clazz);
         jni_env->DeleteLocalRef(activity);
     };
+
+    // Boot directly from a Game Bundle directory (Android analog of desktop main.cpp --bundle). The
+    // mount is set before begin_launch so the shared boot path (set_app_info -> load_app) resolves a
+    // synthetic apps-list entry to the mounted bundle. Native gets a plain FS path here (SAF is
+    // readlink-resolved on the Kotlin side + MANAGE_EXTERNAL_STORAGE), so fs:: access works directly.
+    if (!bundle_dir.empty()) {
+        bundle::Manifest manifest;
+        std::string bundle_error;
+        auto backend = bundle::open_directory_backend(bundle_dir, manifest, bundle_error);
+        if (!backend) {
+            LOG_ERROR("Failed to mount Game Bundle at {}: {}", bundle_dir, bundle_error);
+            return -1;
+        }
+        emuenv->io.mount = bundle::make_mount(backend, manifest);
+
+        app::AppEntry entry;
+        entry.title_id = manifest.title_id;
+        entry.path = manifest.title_id;
+        entry.addcont = manifest.title_id;
+        entry.savedata = manifest.title_id;
+        entry.content_id = manifest.content_id;
+        entry.category = manifest.category.empty() ? "gd" : manifest.category;
+        entry.title = manifest.title_id; // real title is loaded from the bundle's param.sfo at boot
+        entry.stitle = manifest.title_id;
+        entry.app_ver = "N/A";
+        entry.parental_level = "N/A";
+        {
+            std::lock_guard<std::mutex> lock(emuenv->app.apps_list.mutex);
+            auto &apps = emuenv->app.apps_list.apps;
+            std::erase_if(apps, [&](const app::AppEntry &a) { return a.path == entry.path; });
+            apps.push_back(entry);
+        }
+        title_id = manifest.title_id;
+        LOG_INFO("Mounted Game Bundle [{}] from {}", manifest.title_id, bundle_dir);
+    }
 
     AppLaunchRequest launch_request{
         .app_path = title_id,
