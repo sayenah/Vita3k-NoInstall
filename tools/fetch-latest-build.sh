@@ -27,9 +27,11 @@ PLATFORMS=("$@")
 echo "==> Finding the Build CI run for commit $SHORT ..."
 RUN=""
 for _ in $(seq 1 10); do
-  RUN=$(gh run list -R "$REPO" --workflow="$WF" --limit 30 \
-        --json databaseId,headSha \
-        -q "[.[] | select(.headSha==\"$SHA\")] | .[0].databaseId")
+  # Prefer the push-event run (it checks out our exact commit); fall back to any run
+  # for this sha (a pull_request run checks out a synthetic merge commit instead).
+  RUN=$(gh run list -R "$REPO" --workflow="$WF" --limit 40 \
+        --json databaseId,headSha,event \
+        -q "[.[] | select(.headSha==\"$SHA\")] | (map(select(.event==\"push\")) + .) | .[0].databaseId")
   [ -n "$RUN" ] && break
   echo "   ...not registered yet, waiting 15s (did you push this commit?)"
   sleep 15
@@ -59,7 +61,14 @@ for plat in "${PLATFORMS[@]}"; do
   done
   [ -z "$job" ] && continue
 
-  name="vita3k-$SHORT-$plat"
+  # Resolve the real artifact name by platform suffix -- the sha prefix in the name is the run's
+  # checkout sha, which differs between push (our commit) and pull_request (a merge commit) runs.
+  name=$(gh api "repos/$REPO/actions/runs/$RUN/artifacts" --paginate \
+         -q ".artifacts[] | select(.name|endswith(\"-$plat\")) | .name" | head -1)
+  if [ -z "$name" ]; then
+    echo "   !! no artifact ending in '-$plat' on this run -- skipping"
+    continue
+  fi
   out="$DEST/$plat"
   echo "==> Downloading $name -> $out"
   rm -rf "$out"; mkdir -p "$out"
