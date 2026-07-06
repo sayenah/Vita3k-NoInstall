@@ -19,6 +19,7 @@
 #include <app/state.h>
 #include <config/state.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/state.h>
 #include <packages/sfo.h>
 #include <util/fs.h>
@@ -573,6 +574,22 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
     const auto it = std::find_if(state.apps.begin(), state.apps.end(), [&](const AppEntry &app) { return app.path == app_path; });
 
     if (it == state.apps.end()) {
+        // A mounted Game Bundle need not be in the apps list (a startup rescan via scan_apps replaces
+        // the list from ux0/app and drops any synthetic entry). Resolve boot fields from the mount
+        // manifest so bundle boots don't depend on a list entry surviving. Shared by desktop/Android.
+        if (emuenv.io.mount && emuenv.io.mount->manifest.title_id == app_path) {
+            const auto &m = emuenv.io.mount->manifest;
+            emuenv.io.app_path = m.title_id;
+            emuenv.io.title_id = m.title_id;
+            emuenv.io.addcont = m.title_id;
+            emuenv.io.content_id = m.content_id;
+            emuenv.io.savedata = m.title_id;
+            emuenv.current_app_title = m.title_id; // real title loads from param.sfo at boot
+            emuenv.app_info.app_version = "N/A";
+            emuenv.app_info.app_category = m.category.empty() ? "gd" : m.category;
+            emuenv.app_info.app_short_title = m.title_id;
+            return true;
+        }
         LOG_ERROR("{} not found in apps list.", app_path);
         return false;
     }
