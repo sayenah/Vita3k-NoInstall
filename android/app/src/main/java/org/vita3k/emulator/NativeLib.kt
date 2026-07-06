@@ -30,6 +30,9 @@ object NativeLib {
     /** Sets the ROMs folder, persists it, rescans, and returns the names of any files that failed to load. */
     external fun setRomsFolder(path: String): Array<String>
 
+    /** Sets the DLCs folder and persists it (DLC is mounted for the matching game at launch, not listed). */
+    external fun setDlcFolder(path: String)
+
     // --- App actions ---
     /**
      * Dispatches a single app action identified by its AppActionMask bit.

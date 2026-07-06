@@ -1476,6 +1476,15 @@ void MainWindow::setup_toolbar() {
             config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
             m_apps_list_widget->refresh(true); // rescans and reports any unreadable files
         });
+        menu.addAction(tr("Set DLCs Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of DLC (.pkg, <TITLEID>/ folders or <TITLEID>.zip)"),
+                QString::fromStdString(emuenv.cfg.dlc_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.dlc_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            // No rescan needed: DLC isn't a games-list row; it's mounted for the matching game at launch.
+        });
 
         menu.exec(pos);
     });

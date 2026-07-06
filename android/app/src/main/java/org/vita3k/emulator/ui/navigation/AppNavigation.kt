@@ -305,6 +305,18 @@ fun AppNavigation(
                         }
                     }
                 },
+                onSetDlcFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            NativeLib.setDlcFolder(path)
+                            Toast.makeText(
+                                activity,
+                                "DLCs folder set. DLC mounts automatically when you launch a matching game.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                },
                 onInstallClick = { installViewModel.showSheet() },
                 onOpenSettings = {
                     navController.navigate(ROUTE_SETTINGS) {
