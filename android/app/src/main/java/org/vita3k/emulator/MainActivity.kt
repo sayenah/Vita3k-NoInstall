@@ -114,7 +114,7 @@ class MainActivity : AppCompatActivity() {
                     installViewModel = installViewModel,
                     settingsViewModel = settingsViewModel,
                     userManagementViewModel = userManagementViewModel,
-                    onAppLaunch = { app -> launchApp(app.titleId, app.title) }
+                    onAppLaunch = { app -> launchApp(app.titleId, app.title, app.archivePath) }
                 )
             }
         }
@@ -189,8 +189,8 @@ class MainActivity : AppCompatActivity() {
         folderPermissionLauncher.launch(StorageAccess.missingStoragePermissions(this))
     }
 
-    private fun launchApp(titleId: String, appTitle: String) {
-        emulatorLauncher.launch(Emulator.createLaunchIntent(this, titleId, appTitle))
+    private fun launchApp(titleId: String, appTitle: String, archivePath: String? = null) {
+        emulatorLauncher.launch(Emulator.createLaunchIntent(this, titleId, appTitle, archivePath))
     }
 
     private fun launchFilePicker(mimeTypes: Array<String>) {

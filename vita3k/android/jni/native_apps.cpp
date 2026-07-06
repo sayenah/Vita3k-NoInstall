@@ -31,7 +31,7 @@ Java_org_vita3k_emulator_NativeLib_getAppListDetailed(JNIEnv *env, jclass) {
     if (!app_info_class)
         return nullptr;
 
-    jmethodID ctor = env->GetMethodID(app_info_class, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZIJJ)V");
+    jmethodID ctor = env->GetMethodID(app_info_class, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZIJJ)V");
     if (!ctor)
         return env->NewObjectArray(0, app_info_class, nullptr);
 
@@ -66,6 +66,7 @@ Java_org_vita3k_emulator_NativeLib_getAppListDetailed(JNIEnv *env, jclass) {
         jstring category = env->NewStringUTF(app.category.c_str());
         jstring app_ver = env->NewStringUTF(app.app_ver.c_str());
         jstring icon_path_str = env->NewStringUTF(icon_full.c_str());
+        jstring archive_path = env->NewStringUTF(app.archive_path.c_str());
 
         jobject app_info = env->NewObject(app_info_class, ctor,
             title_id,
@@ -73,6 +74,7 @@ Java_org_vita3k_emulator_NativeLib_getAppListDetailed(JNIEnv *env, jclass) {
             category,
             app_ver,
             icon_path_str,
+            archive_path,
             static_cast<jboolean>(has_custom_config),
             static_cast<jint>(compat_state),
             static_cast<jlong>(last_played),
@@ -85,6 +87,7 @@ Java_org_vita3k_emulator_NativeLib_getAppListDetailed(JNIEnv *env, jclass) {
         env->DeleteLocalRef(category);
         env->DeleteLocalRef(app_ver);
         env->DeleteLocalRef(icon_path_str);
+        env->DeleteLocalRef(archive_path);
     }
 
     return result;
