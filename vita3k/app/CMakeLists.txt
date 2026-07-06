@@ -8,6 +8,7 @@ add_library(
 	src/app_init.cpp
 	src/app.cpp
 	src/apps_list.cpp
+	src/roms_list.cpp
 	src/discord.cpp
 	src/session_controller.cpp
 	src/user.cpp

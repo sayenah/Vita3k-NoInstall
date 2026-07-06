@@ -26,6 +26,7 @@
 
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QMessageBox>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -67,6 +68,11 @@ void AppsList::refresh(bool from_disk) {
     else if (!app::load_cached_apps(m_emuenv))
         app::scan_apps(m_emuenv);
 
+    // Add rows for the games in the ROMs folder (.zip/.7z/.pkg) and collect any that couldn't be read.
+    const auto rom_failures = app::scan_roms(m_emuenv);
+    for (const auto &failure : rom_failures)
+        LOG_WARN("Could not load ROM: {}", failure);
+
     app::load_app_times(m_emuenv);
 
     m_apps = app::get_apps(m_emuenv);
@@ -75,6 +81,14 @@ void AppsList::refresh(bool from_disk) {
 
     if (!m_search_text.isEmpty())
         set_search_text(m_search_text);
+
+    // Report unreadable ROMs on a user-initiated refresh (from_disk), not on every startup.
+    if (from_disk && !rom_failures.empty()) {
+        QString msg = tr("These files in the ROMs folder could not be loaded:") + "\n\n";
+        for (const auto &failure : rom_failures)
+            msg += QString::fromStdString(failure) + "\n";
+        QMessageBox::warning(this, tr("ROMs folder"), msg);
+    }
 }
 
 void AppsList::resize_icons(int slider_pos) {
