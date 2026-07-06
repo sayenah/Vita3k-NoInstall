@@ -27,6 +27,7 @@
 #include <display/functions.h>
 #include <display/state.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -463,7 +464,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
 
     // Load param.sfo
     vfs::FileBuffer param_sfo;
-    if (vfs::read_app_file(param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
+    if (vfs::read_app_file(emuenv.io, param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
         sfo::load(emuenv.sfo_handle, param_sfo);
 
     init_exported_vars(emuenv);
@@ -505,7 +506,12 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         if ((process_preload_disabled & code) == 0) {
             if (is_lle_module(name, emuenv)) {
                 const auto module_name_file = fmt::format("{}.suprx", name);
-                if (load_from_app && fs::exists(module_app_path / module_name_file))
+                // The app-supplied module may live in a mounted Game Bundle rather than on the host
+                // FS; probe the bundle first so bundle games still preload their own modules.
+                const auto app_module_ux0_rel = fs::path("app") / emuenv.io.app_path / "sce_module" / module_name_file;
+                const auto bundle_has = bundle::try_exists_ux0(emuenv.io, app_module_ux0_rel);
+                const bool app_module_exists = bundle_has ? *bundle_has : fs::exists(module_app_path / module_name_file);
+                if (load_from_app && app_module_exists)
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
                 else if (fs::exists(emuenv.vita_fs_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));

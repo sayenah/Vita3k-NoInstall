@@ -23,14 +23,17 @@
 #include <F00DKeyEncryptorFactory.h>
 #include <PsvPfsParserConfig.h>
 #include <Utils.h>
+#include <miniz.h>
 #include <openssl/evp.h>
 #include <rif2zrif.h>
 
+#include <io/bundle.h>
 #include <io/functions.h>
 
 #include <config/state.h>
 #include <emuenv/state.h>
 
+#include <packages/archive_7z.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -39,6 +42,7 @@
 
 #include <util/bytes.h>
 #include <util/log.h>
+#include <util/string_utils.h>
 
 // Credits to mmozeiko https://github.com/mmozeiko/pkg2zip
 
@@ -76,7 +80,8 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     return true;
 }
 
-bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback) {
+bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback, const fs::path &temp_root) {
+    const bool temp_mode = !temp_root.empty();
     FILE *infile = FOPEN(pkg_path.c_str(), "rb");
     if (!infile) {
         LOG_CRITICAL("Failed to load pkg file in path: {}", fs_utils::path_to_utf8(pkg_path));
@@ -211,11 +216,17 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         type = PkgType::PKG_TYPE_VITA_PATCH;
     }
 
-    auto path{ emuenv.vita_fs_path / "ux0" };
+    if (temp_mode && type != PkgType::PKG_TYPE_VITA_APP) {
+        LOG_ERROR("Play-without-install only supports base-game pkgs (got content type {})", content_type);
+        return false;
+    }
+
+    // temp_mode decrypts the app tree into temp_root/app (mounted read-only, no ux0/app install).
+    auto path{ temp_mode ? temp_root : emuenv.vita_fs_path / "ux0" };
 
     switch (type) {
     case PkgType::PKG_TYPE_VITA_APP:
-        path /= fs::path("app") / emuenv.app_info.app_title_id;
+        path /= temp_mode ? fs::path("app") : fs::path("app") / emuenv.app_info.app_title_id;
         if (fs::exists(path))
             fs::remove_all(path);
         emuenv.app_info.app_title += " (App)";
@@ -304,6 +315,15 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     fs::path title_id_src = path;
     fs::path title_id_dst = fs_utils::path_concat(path, "_dec");
     std::string zRIF = p_zRIF;
+
+    // Self-contained NoNpDrm dumps carry their license in sce_sys/package/work.bin. When no external
+    // zRIF was supplied, derive one from work.bin so the PFS layer decrypts without a separate key.
+    const auto workbin_path = path / "sce_sys/package/work.bin";
+    if (zRIF.empty() && fs::exists(workbin_path)) {
+        fs::ifstream binfile(workbin_path, std::ios::in | std::ios::binary | std::ios::ate);
+        zRIF = rif2zrif(binfile);
+    }
+
     F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
     std::string f00d_arg = std::string();
 
@@ -344,13 +364,338 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         break;
     }
 
-    if (!copy_path(title_id_src, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
+    // temp_mode keeps the decrypted tree in temp_root (no ux0/app install); copy_path would relocate
+    // it into ux0/app, so skip it. The license (below) still goes to the real ux0/license.
+    if (!temp_mode && !copy_path(title_id_src, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
         return false;
 
     create_license(emuenv, zRIF);
 
     progress_callback(100);
     return true;
+}
+
+// True if the zip contains a decrypted game tree (has an sce_sys/param.sfo entry) rather than a .pkg.
+static bool zip_has_decrypted_game(const fs::path &zip_path) {
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp)
+        return false;
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        return false;
+    }
+    bool found = false;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files && !found; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat))
+            continue;
+        const std::string name = string_utils::tolower(stat.m_filename);
+        if (name.size() >= 17 && name.compare(name.size() - 17, 17, "sce_sys/param.sfo") == 0)
+            found = true;
+    }
+    mz_zip_reader_end(&zip);
+    fclose(fp);
+    return found;
+}
+
+// After extracting a decrypted-game zip into temp_root, find the app tree (the dir holding
+// sce_sys/param.sfo) wherever it sits (app/, app/<TITLEID>/, <TITLEID>/, …) and move it to
+// temp_root/app so the directory-backend mount can serve it. Renames within temp are cheap.
+static bool normalize_app_tree(const fs::path &temp_root, std::string &error_out) {
+    boost::system::error_code ec;
+    fs::path app_dir;
+    for (fs::recursive_directory_iterator it(temp_root, ec), end; it != end; it.increment(ec)) {
+        if (ec)
+            break;
+        const fs::path p = it->path();
+        if (p.filename() == "param.sfo" && p.parent_path().filename() == "sce_sys") {
+            app_dir = p.parent_path().parent_path();
+            break;
+        }
+    }
+    if (app_dir.empty()) {
+        error_out = "no sce_sys/param.sfo found inside the zip";
+        return false;
+    }
+
+    const fs::path canonical_app = temp_root / "app";
+    if (fs::equivalent(app_dir, canonical_app, ec) && !ec)
+        return true; // already at temp_root/app
+
+    if (fs::equivalent(app_dir, temp_root, ec) && !ec) {
+        error_out = "unexpected zip layout (game files at the zip root)";
+        return false;
+    }
+
+    const fs::path stage = temp_root / "__app_stage";
+    fs::remove_all(stage, ec);
+    fs::rename(app_dir, stage, ec);
+    if (ec) {
+        error_out = "failed to relocate app tree";
+        return false;
+    }
+    fs::remove_all(canonical_app, ec); // clear whatever held the app tree (e.g. app/<TITLEID> parent)
+    fs::rename(stage, canonical_app, ec);
+    if (ec) {
+        error_out = "failed to place app tree";
+        return false;
+    }
+    return true;
+}
+
+// Extract every member of a zip into dst_dir (preserving its tree). Returns false (error_out set) on
+// any failure.
+static bool extract_zip_to_dir(const fs::path &zip_path, const fs::path &dst_dir, std::string &error_out) {
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp) {
+        error_out = "cannot open zip file";
+        return false;
+    }
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        error_out = "not a valid zip archive";
+        return false;
+    }
+    bool ok = true;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat))
+            continue;
+        const fs::path out_path = dst_dir / fs_utils::utf8_to_path(stat.m_filename);
+        if (mz_zip_reader_is_file_a_directory(&zip, i)) {
+            fs::create_directories(out_path);
+            continue;
+        }
+        fs::create_directories(out_path.parent_path());
+        if (!mz_zip_reader_extract_to_file(&zip, i, fs_utils::path_to_utf8(out_path).c_str(), 0)) {
+            error_out = std::string("failed to extract ") + stat.m_filename;
+            ok = false;
+            break;
+        }
+    }
+    mz_zip_reader_end(&zip);
+    fclose(fp);
+    return ok;
+}
+
+// Extract the first .pkg member of a zip to `out_pkg`. Returns false (error_out set) if the zip can't
+// be opened or contains no .pkg.
+static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_pkg, std::string &error_out) {
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp) {
+        error_out = "cannot open zip file";
+        return false;
+    }
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        error_out = "not a valid zip archive";
+        return false;
+    }
+
+    int pkg_index = -1;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat) || mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+        const std::string name = string_utils::tolower(stat.m_filename);
+        if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".pkg") == 0) {
+            pkg_index = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (pkg_index < 0) {
+        mz_zip_reader_end(&zip);
+        fclose(fp);
+        error_out = "no .pkg found inside the zip";
+        return false;
+    }
+
+    const bool ok = mz_zip_reader_extract_to_file(&zip, pkg_index, fs_utils::path_to_utf8(out_pkg).c_str(), 0);
+    mz_zip_reader_end(&zip);
+    fclose(fp);
+    if (!ok)
+        error_out = "failed to extract .pkg from the zip";
+    return ok;
+}
+
+std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
+    boost::system::error_code ec;
+    const fs::path temp_root = emuenv.cache_path / "pkgplay";
+    fs::remove_all(temp_root, ec); // clear any stale temp (e.g. after a crash)
+    fs::create_directories(temp_root, ec);
+
+    const std::string ext = string_utils::tolower(input_path.extension().string());
+    const bool is_zip = (ext == ".zip");
+    const bool is_7z = (ext == ".7z");
+    const bool is_archive = is_zip || is_7z;
+
+    // Dispatch the archive helpers by container so .zip and .7z are handled uniformly.
+    const auto arch_has_decrypted = [&](const fs::path &p) {
+        return is_7z ? sevenz_has_decrypted_game(p) : zip_has_decrypted_game(p);
+    };
+    const auto arch_extract_all = [&](const fs::path &p, const fs::path &d, std::string &e) {
+        return is_7z ? extract_7z_to_dir(p, d, e) : extract_zip_to_dir(p, d, e);
+    };
+    const auto arch_extract_pkg = [&](const fs::path &p, const fs::path &o, std::string &e) {
+        return is_7z ? extract_pkg_from_7z(p, o, e) : extract_pkg_from_zip(p, o, e);
+    };
+
+    std::string title_id;
+    std::string content_id;
+    std::string category = "gd";
+
+    if (is_archive && arch_has_decrypted(input_path)) {
+        // An archive that already holds a decrypted game tree (no decryption needed): unpack it, then
+        // move the app tree to temp_root/app regardless of how it was nested (app/, app/<TITLEID>/, …).
+        if (!arch_extract_all(input_path, temp_root, error_out)) {
+            fs::remove_all(temp_root, ec);
+            return {};
+        }
+        if (!normalize_app_tree(temp_root, error_out)) {
+            fs::remove_all(temp_root, ec);
+            return {};
+        }
+
+        std::vector<uint8_t> mbytes;
+        bundle::Manifest m;
+        std::string berr;
+        if (fs_utils::read_data(temp_root / "vita3k_bundle.json", mbytes) && bundle::parse_manifest(mbytes, m, berr) && !m.title_id.empty()) {
+            title_id = m.title_id;
+            content_id = m.content_id;
+            if (!m.category.empty())
+                category = m.category;
+        } else {
+            std::vector<uint8_t> sfo_buf;
+            if (!fs_utils::read_data(temp_root / "app/sce_sys/param.sfo", sfo_buf)) {
+                error_out = "zip has an app/ folder but no readable app/sce_sys/param.sfo";
+                fs::remove_all(temp_root, ec);
+                return {};
+            }
+            sfo::SfoAppInfo info;
+            sfo::get_param_info(info, sfo_buf, emuenv.cfg.sys_lang);
+            title_id = info.app_title_id;
+            content_id = info.app_content_id;
+            if (!info.app_category.empty())
+                category = info.app_category;
+        }
+
+        // Place the license on the real ux0/license so boot can decrypt the game's own modules.
+        // NoNpDrm dumps carry it in app/sce_sys/package/work.bin; also honor any bundled *.rif. Match
+        // case-insensitively and recursively: a case-sensitive host (Android/Linux) misses a fixed
+        // "work.bin" path when the dump stored a different case, so key off the lowercased filename/
+        // extension instead of an exact path (this is why desktop, case-insensitive, found the license
+        // but Android did not).
+        for (const auto &entry : fs::recursive_directory_iterator(temp_root, ec)) {
+            if (ec)
+                break;
+            if (!fs::is_regular_file(entry.path()))
+                continue;
+            const std::string fname = string_utils::tolower(entry.path().filename().string());
+            const std::string fext = string_utils::tolower(entry.path().extension().string());
+            if (fname == "work.bin" || fext == ".rif")
+                copy_license(emuenv, entry.path());
+        }
+    } else {
+        // A raw .pkg, or an archive containing one: decrypt into temp_root/app (rif -> ux0/license).
+        fs::path pkg_path = input_path;
+        fs::path extracted_pkg;
+        if (is_archive) {
+            extracted_pkg = temp_root / "_src.pkg";
+            if (!arch_extract_pkg(input_path, extracted_pkg, error_out)) {
+                fs::remove_all(temp_root, ec);
+                return {};
+            }
+            pkg_path = extracted_pkg;
+        }
+
+        std::string zrif; // empty -> install_pkg derives it from the pkg's work.bin
+        if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
+            error_out = "failed to decrypt pkg (expected a self-contained NoNpDrm base-game pkg)";
+            fs::remove_all(temp_root, ec);
+            return {};
+        }
+        if (!extracted_pkg.empty())
+            fs::remove(extracted_pkg, ec); // source pkg no longer needed once decrypted
+
+        title_id = emuenv.app_info.app_title_id;
+        content_id = emuenv.app_info.app_content_id;
+        if (!emuenv.app_info.app_category.empty())
+            category = emuenv.app_info.app_category;
+    }
+
+    if (title_id.empty()) {
+        error_out = "could not determine the game's title id";
+        fs::remove_all(temp_root, ec);
+        return {};
+    }
+
+    // Ensure a manifest exists so the directory-backend mount can open temp_root.
+    if (!fs::exists(temp_root / "vita3k_bundle.json")) {
+        fs::ofstream mf(temp_root / "vita3k_bundle.json", std::ios::out | std::ios::binary);
+        mf << "{\"version\":1,\"title_id\":\"" << title_id << "\",\"content_id\":\"" << content_id
+           << "\",\"category\":\"" << category << "\",\"has_patch\":false,\"dlc\":[]}";
+    }
+
+    bundle::Manifest manifest;
+    std::string berr;
+    auto backend = bundle::open_directory_backend(temp_root, manifest, berr);
+    if (!backend) {
+        error_out = "failed to mount game: " + berr;
+        fs::remove_all(temp_root, ec);
+        return {};
+    }
+
+    auto mount = bundle::make_mount(backend, manifest);
+    mount->owned_temp = temp_root;
+    emuenv.io.mount = mount;
+
+    LOG_INFO("Prepared [{}] for play-without-install from {}", title_id, fs_utils::path_to_utf8(input_path));
+    return title_id;
+}
+
+bool read_pkg_param_sfo(const fs::path &pkg_path, std::vector<uint8_t> &sfo_out) {
+    FILE *infile = FOPEN(pkg_path.c_str(), "rb");
+    if (!infile)
+        return false;
+
+    PkgHeader pkg_header{};
+    if (fread(&pkg_header, sizeof(PkgHeader), 1, infile) != 1 || byte_swap(pkg_header.magic) != 0x7F504b47) {
+        fclose(infile);
+        return false;
+    }
+
+    uint32_t info_offset = byte_swap(pkg_header.info_offset);
+    uint32_t sfo_offset = 0;
+    uint32_t sfo_size = 0;
+    for (uint32_t i = 0; i < byte_swap(pkg_header.info_count); i++) {
+        uint32_t block[4];
+        fseek(infile, info_offset, SEEK_SET);
+        if (fread(block, sizeof(block), 1, infile) != 1)
+            break;
+        if (byte_swap(block[0]) == 14) { // param.sfo record
+            sfo_offset = byte_swap(block[2]);
+            sfo_size = byte_swap(block[3]);
+        }
+        info_offset += 2 * sizeof(uint32_t) + byte_swap(block[1]);
+    }
+
+    if (sfo_size == 0) {
+        fclose(infile);
+        return false;
+    }
+
+    sfo_out.resize(sfo_size);
+    fseek(infile, sfo_offset, SEEK_SET);
+    const bool ok = fread(sfo_out.data(), sfo_size, 1, infile) == 1;
+    fclose(infile);
+    return ok;
 }
 
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path) {
