@@ -216,8 +216,8 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         type = PkgType::PKG_TYPE_VITA_PATCH;
     }
 
-    if (temp_mode && type != PkgType::PKG_TYPE_VITA_APP) {
-        LOG_ERROR("Play-without-install only supports base-game pkgs (got content type {})", content_type);
+    if (temp_mode && type != PkgType::PKG_TYPE_VITA_APP && type != PkgType::PKG_TYPE_VITA_DLC) {
+        LOG_ERROR("Play-without-install supports base-game and DLC pkgs (got content type {})", content_type);
         return false;
     }
 
@@ -232,7 +232,12 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         emuenv.app_info.app_title += " (App)";
         break;
     case PkgType::PKG_TYPE_VITA_DLC:
-        path /= fs::path("addcont") / emuenv.app_info.app_title_id / emuenv.app_info.app_content_id;
+        // Installed layout is addcont/<title>/<content>; the play-mount serves addcont0: from
+        // temp_root/addcont/<content> (one game per mount, so the title-id level is redundant and,
+        // more importantly, is stripped by BundleMount::map_ux0_path -- keep the temp tree matching).
+        path /= temp_mode
+            ? fs::path("addcont") / emuenv.app_info.app_content_id
+            : fs::path("addcont") / emuenv.app_info.app_title_id / emuenv.app_info.app_content_id;
         emuenv.app_info.app_title += " (DLC)";
         break;
     case PkgType::PKG_TYPE_VITA_PATCH:
@@ -324,6 +329,12 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         zRIF = rif2zrif(binfile);
     }
 
+    // Original (non-NoNpDrm) pkgs carry no work.bin. Fall back to a rif the user pre-placed on
+    // ux0/license (e.g. the whole tree built by tools/build-license-folder.py): find_pkg_zrif reads
+    // the pkg's content id, loads that rif, and turns it back into a zRIF for the PFS decrypt.
+    if (zRIF.empty())
+        zRIF = find_pkg_zrif(pkg_path, emuenv.vita_fs_path);
+
     F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
     std::string f00d_arg = std::string();
 
@@ -347,12 +358,12 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
             fs::remove_all(fs::path(title_id_src));
             fs::remove_all(fs::path(title_id_dst));
             return false;
-        } else {
-            fs::remove_all(title_id_src);
-            fs::rename(title_id_dst, title_id_src);
-            return true;
         }
-        break;
+        fs::remove_all(title_id_src);
+        fs::rename(title_id_dst, title_id_src);
+        if (temp_mode)
+            create_license(emuenv, zRIF); // place the DLC rif on ux0/license so runtime DRM checks resolve
+        return true;
 
     case PkgType::PKG_TYPE_VITA_THEME:
 
@@ -525,6 +536,181 @@ static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_p
     return ok;
 }
 
+// ---- DLC (addcont0:) support for play-without-install ------------------------------------------
+//
+// DLC plays without install by decrypting/relocating it into temp_root/addcont/<contentid>, which the
+// bundle mount serves as addcont0: (BundleMount::map_ux0_path strips the title-id level, so the temp
+// uses <contentid> directly, no <title-id>/ level). Sources: an addcont/ folder inside the game
+// archive, and the configured DLCs folder (a <TITLEID>/ folder, a <TITLEID>.zip/.7z, or loose .pkg
+// files whose embedded title id matches the game).
+
+// Title id embedded in a .pkg header's content id (chars 7..15), or "" if unreadable.
+static std::string dlc_pkg_title_id(const fs::path &pkg_path) {
+    FILE *f = FOPEN(pkg_path.c_str(), "rb");
+    if (!f)
+        return {};
+    PkgHeader h{};
+    const size_t n = fread(&h, 1, sizeof(PkgHeader), f);
+    fclose(f);
+    if (n < sizeof(PkgHeader))
+        return {};
+    const std::string cid(h.content_id);
+    return cid.size() >= 16 ? cid.substr(7, 9) : std::string{};
+}
+
+// Decrypt one DLC .pkg into temp_root/addcont/<contentid> (install_pkg temp_mode). The zRIF is
+// self-served from the pkg's work.bin or a pre-placed ux0/license rif.
+static void decrypt_dlc_pkg(EmuEnvState &emuenv, const fs::path &pkg_path, const fs::path &temp_root) {
+    // Only decrypt actual DLC. A base-game pkg shares the title id and, in temp mode, would decrypt
+    // into temp_root/app and clobber the mounted game -- the pkg's own CATEGORY is "ac" for DLC.
+    std::vector<uint8_t> sfo;
+    if (read_pkg_param_sfo(pkg_path, sfo)) {
+        sfo::SfoAppInfo info;
+        sfo::get_param_info(info, sfo, emuenv.cfg.sys_lang);
+        if (info.app_category != "ac") {
+            LOG_INFO("DLC: skipping {} -- not DLC (category '{}')", fs_utils::path_to_utf8(pkg_path.filename()), info.app_category);
+            return;
+        }
+    }
+    std::string zrif;
+    if (install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root))
+        LOG_INFO("DLC: mounted {}", fs_utils::path_to_utf8(pkg_path.filename()));
+    else
+        LOG_WARN("DLC: could not decrypt {} (needs a work.bin or a ux0/license rif)", fs_utils::path_to_utf8(pkg_path.filename()));
+}
+
+// Relocate already-decrypted DLC content (an addcont/ tree) into temp_root/addcont/<contentid>,
+// collapsing a redundant <title_id>/ level if the tree uses the installed ux0 layout.
+static void place_addcont_dir(const fs::path &addcont_dir, const fs::path &temp_root, const std::string &title_id) {
+    boost::system::error_code ec;
+    const fs::path dst_root = temp_root / "addcont";
+    fs::create_directories(dst_root, ec);
+    fs::path base = addcont_dir;
+    if (fs::is_directory(addcont_dir / title_id, ec))
+        base = addcont_dir / title_id;
+    for (fs::directory_iterator it(base, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!fs::is_directory(it->path(), ec))
+            continue;
+        const fs::path dst = dst_root / it->path().filename();
+        if (fs::equivalent(it->path(), dst, ec) && !ec)
+            continue; // already in place
+        ec.clear();
+        fs::remove_all(dst, ec);
+        fs::rename(it->path(), dst, ec);
+        if (ec) { // e.g. cross-device rename: fall back to a recursive copy
+            ec.clear();
+            fs::copy(it->path(), dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        }
+    }
+}
+
+// Relocate any addcont/ trees at `root` or one level below it (covers "addcont/" and
+// "<TITLEID>/addcont/"), skipping the game's own app tree.
+static void collect_addcont_trees(const fs::path &root, const fs::path &temp_root, const std::string &title_id) {
+    boost::system::error_code ec;
+    const fs::path app_dir = temp_root / "app";
+    const auto consider = [&](const fs::path &d) {
+        if (fs::is_directory(d, ec))
+            place_addcont_dir(d, temp_root, title_id);
+    };
+    consider(root / "addcont");
+    for (fs::directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const fs::path p = it->path();
+        if (!fs::is_directory(p, ec) || (fs::equivalent(p, app_dir, ec) && !ec)) {
+            ec.clear();
+            continue;
+        }
+        ec.clear();
+        consider(p / "addcont");
+    }
+}
+
+// Decrypt every .pkg under `dir`. match_all=false only decrypts pkgs whose embedded title id equals
+// `title_id` (used for loose pkgs shared in one folder).
+static void decrypt_dlc_pkgs_under(EmuEnvState &emuenv, const fs::path &dir, const fs::path &temp_root, const std::string &title_id, bool match_all) {
+    boost::system::error_code ec;
+    for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const fs::path p = it->path();
+        if (!fs::is_regular_file(p, ec) || string_utils::tolower(p.extension().string()) != ".pkg")
+            continue;
+        if (match_all || dlc_pkg_title_id(p) == title_id)
+            decrypt_dlc_pkg(emuenv, p, temp_root);
+    }
+}
+
+// Bring in all of `title_id`'s DLC as addcont0: content under temp_root/addcont. Best-effort: warns
+// and skips anything it can't process. install_pkg overwrites emuenv.app_info, so the caller must
+// snapshot/restore the game's around this.
+static void mount_dlc_for_game(EmuEnvState &emuenv, const fs::path &temp_root, const std::string &title_id) {
+    boost::system::error_code ec;
+
+    // (1) DLC shipped inside the game archive (an addcont/ folder extracted alongside app/).
+    collect_addcont_trees(temp_root, temp_root, title_id);
+
+    // (2) The configured DLCs folder.
+    const std::string &folder = emuenv.cfg.dlc_folder;
+    if (folder.empty())
+        return;
+    const fs::path dlc_root = fs_utils::utf8_to_path(folder);
+    if (!fs::is_directory(dlc_root, ec))
+        return;
+
+    const fs::path t_dir = dlc_root / title_id;
+
+    // (2a) A <TITLEID>/ folder holding this game's DLC (pkgs and/or decrypted addcont content).
+    if (fs::is_directory(t_dir, ec)) {
+        decrypt_dlc_pkgs_under(emuenv, t_dir, temp_root, title_id, /*match_all=*/true);
+        collect_addcont_trees(t_dir, temp_root, title_id);
+    }
+
+    // (2b) A <TITLEID>.zip / .7z of this game's DLC.
+    for (const char *ext : { ".zip", ".7z" }) {
+        const fs::path t_arch = dlc_root / (title_id + ext);
+        if (!fs::is_regular_file(t_arch, ec))
+            continue;
+        const fs::path scratch = temp_root / "__dlc";
+        fs::remove_all(scratch, ec);
+        fs::create_directories(scratch, ec);
+        std::string e;
+        const bool ok = (std::string(ext) == ".7z") ? extract_7z_to_dir(t_arch, scratch, e) : extract_zip_to_dir(t_arch, scratch, e);
+        if (ok) {
+            decrypt_dlc_pkgs_under(emuenv, scratch, temp_root, title_id, /*match_all=*/true);
+            collect_addcont_trees(scratch, temp_root, title_id);
+        } else {
+            LOG_WARN("DLC: could not extract {} ({})", fs_utils::path_to_utf8(t_arch.filename()), e);
+        }
+        fs::remove_all(scratch, ec);
+    }
+
+    // (2c) Loose .pkg files anywhere in the DLCs folder, matched to this game by embedded title id.
+    const std::string t_dir_prefix = fs_utils::path_to_utf8(t_dir);
+    for (fs::recursive_directory_iterator it(dlc_root, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const fs::path p = it->path();
+        if (!fs::is_regular_file(p, ec) || string_utils::tolower(p.extension().string()) != ".pkg")
+            continue;
+        if (fs_utils::path_to_utf8(p).rfind(t_dir_prefix, 0) == 0)
+            continue; // already handled inside the <TITLEID>/ folder
+        if (dlc_pkg_title_id(p) == title_id)
+            decrypt_dlc_pkg(emuenv, p, temp_root);
+    }
+}
+
 std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
     boost::system::error_code ec;
     const fs::path temp_root = emuenv.cache_path / "pkgplay";
@@ -634,6 +820,15 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
         error_out = "could not determine the game's title id";
         fs::remove_all(temp_root, ec);
         return {};
+    }
+
+    // Bring in this game's DLC as addcont0: content (no install), from an addcont/ folder inside the
+    // game archive and from the configured DLCs folder. install_pkg clobbers emuenv.app_info, so
+    // snapshot/restore the game's around it -- boot needs the game's app_info, not a DLC's.
+    {
+        const auto saved_app_info = emuenv.app_info;
+        mount_dlc_for_game(emuenv, temp_root, title_id);
+        emuenv.app_info = saved_app_info;
     }
 
     // Ensure a manifest exists so the directory-backend mount can open temp_root.
