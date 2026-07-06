@@ -23,7 +23,9 @@
 #pragma once
 
 #include <emuenv/state.h>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 // Credits to mmozeiko https://github.com/mmozeiko/pkg2zip
 
@@ -81,6 +83,20 @@ struct PkgEntry {
     uint32_t padding;
 };
 
-bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback = nullptr);
+// Installs a pkg into ux0. If `temp_root` is non-empty, instead decrypts a base-game pkg into
+// `temp_root/app` (no ux0/app install, copy_path skipped) for play-without-install; the license rif
+// still goes to the real ux0/license. When no zRIF is supplied, a self-contained NoNpDrm pkg's
+// sce_sys/package/work.bin is used to derive one.
+bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback = nullptr, const fs::path &temp_root = {});
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path);
+
+// Reads the metadata param.sfo out of a pkg's info section (no decryption). For a games-list scan:
+// gives title/title_id/category cheaply. Returns false if not a valid pkg or it has no sfo.
+bool read_pkg_param_sfo(const fs::path &pkg_path, std::vector<uint8_t> &sfo_out);
 bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path, const std::function<void(float)> &progress_callback = nullptr);
+
+// Decrypts a self-contained (NoNpDrm) base-game pkg to a private temp dir, drops its license rif on
+// the real ux0/license, and mounts the temp tree read-only (io.mount) so it can be booted with no
+// permanent install. Returns the title id to boot (run_app_path), or "" on failure (error_out set).
+// The temp dir is owned by the mount and deleted in io_deinit when the game stops.
+std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &pkg_path, std::string &error_out);
