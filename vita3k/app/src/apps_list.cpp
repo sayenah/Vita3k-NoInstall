@@ -19,6 +19,7 @@
 #include <app/state.h>
 #include <config/state.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/state.h>
 #include <packages/sfo.h>
 #include <util/fs.h>
@@ -169,8 +170,11 @@ static bool write_apps_cache_file(const EmuEnvState &emuenv, const std::vector<A
     }
 
     auto apps_node = root.append_child("apps");
-    for (const auto &app : apps)
+    for (const auto &app : apps) {
+        if (!app.archive_path.empty())
+            continue; // ROM-folder entries are rescanned live, never cached
         write_app_cache_entry(apps_node, app);
+    }
 
     if (!doc.save_file(cache_path.c_str())) {
         LOG_ERROR("Failed to write apps cache to {}", cache_path);
@@ -323,7 +327,7 @@ void save_apps_cache(EmuEnvState &emuenv) {
 AppEntry read_app_info(EmuEnvState &emuenv, const std::string &title_id) {
     sfo::SfoAppInfo info;
     vfs::FileBuffer param;
-    if (vfs::read_app_file(param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo")) {
+    if (vfs::read_app_file(emuenv.io, param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo")) {
         sfo::get_param_info(info, param, emuenv.cfg.sys_lang);
     } else {
         info.app_title_id = title_id;
@@ -573,6 +577,22 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
     const auto it = std::find_if(state.apps.begin(), state.apps.end(), [&](const AppEntry &app) { return app.path == app_path; });
 
     if (it == state.apps.end()) {
+        // A mounted Game Bundle need not be in the apps list (a startup rescan via scan_apps replaces
+        // the list from ux0/app and drops any synthetic entry). Resolve boot fields from the mount
+        // manifest so bundle boots don't depend on a list entry surviving. Shared by desktop/Android.
+        if (emuenv.io.mount && emuenv.io.mount->manifest.title_id == app_path) {
+            const auto &m = emuenv.io.mount->manifest;
+            emuenv.io.app_path = m.title_id;
+            emuenv.io.title_id = m.title_id;
+            emuenv.io.addcont = m.title_id;
+            emuenv.io.content_id = m.content_id;
+            emuenv.io.savedata = m.title_id;
+            emuenv.current_app_title = m.title_id; // real title loads from param.sfo at boot
+            emuenv.app_info.app_version = "N/A";
+            emuenv.app_info.app_category = m.category.empty() ? "gd" : m.category;
+            emuenv.app_info.app_short_title = m.title_id;
+            return true;
+        }
         LOG_ERROR("{} not found in apps list.", app_path);
         return false;
     }

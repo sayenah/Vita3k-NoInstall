@@ -27,6 +27,9 @@ object NativeLib {
     external fun getAppListDetailed(): Array<NativeAppInfo>
     external fun refreshAppsList()
 
+    /** Sets the ROMs folder, persists it, rescans, and returns the names of any files that failed to load. */
+    external fun setRomsFolder(path: String): Array<String>
+
     // --- App actions ---
     /**
      * Dispatches a single app action identified by its AppActionMask bit.

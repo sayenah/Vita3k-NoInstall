@@ -53,6 +53,9 @@ struct AppEntry {
     std::string title_id;
     std::string path;
     std::string icon_path;
+    // Non-empty for a "ROM" entry: a game played from this archive (.zip/.7z/.pkg) with no install.
+    // Launch routes through mount_pkg_for_play() instead of the normal installed-app path.
+    std::string archive_path;
 };
 
 struct AppTime {

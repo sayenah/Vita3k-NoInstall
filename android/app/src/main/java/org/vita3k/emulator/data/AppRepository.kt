@@ -157,6 +157,7 @@ internal object AppRepository {
         category = native.category,
         appVer = native.appVer,
         iconPath = native.iconPath.ifEmpty { null },
+        archivePath = native.archivePath.ifEmpty { null },
         hasCustomConfig = native.hasCustomConfig,
         compatibility = CompatibilityState.fromValue(native.compatibility),
         lastPlayed = native.lastPlayed,
