@@ -177,6 +177,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "cpu-opt", true, cpu_opt)                                                                \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(std::string, "roms-folder", std::string{}, roms_folder)                                        \
+    code(std::string, "dlc-folder", std::string{}, dlc_folder)                                          \
     code(bool, "discord-rich-presence", true, discord_rich_presence)                                    \
     code(bool, "wait-for-debugger", false, wait_for_debugger)                                           \
     code(bool, "color-surface-debug", false, color_surface_debug)                                       \
