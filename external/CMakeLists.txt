@@ -83,6 +83,17 @@ add_subdirectory(libfat16)
 add_library(miniz STATIC miniz/miniz.c miniz/miniz.h)
 target_include_directories(miniz PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/miniz")
 
+# LZMA SDK (public domain) — minimal 7z read/decode subset, for playing games from .7z archives.
+file(GLOB LZMA_SDK_SRC "${CMAKE_CURRENT_SOURCE_DIR}/lzma-sdk/*.c")
+add_library(lzma-sdk STATIC ${LZMA_SDK_SRC})
+target_include_directories(lzma-sdk PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lzma-sdk")
+target_compile_definitions(lzma-sdk PRIVATE _7ZIP_PPMD_SUPPPORT Z7_PPMD_SUPPORT)
+if(MSVC)
+	target_compile_options(lzma-sdk PRIVATE /w) # silence third-party warnings
+else()
+	target_compile_options(lzma-sdk PRIVATE -w)
+endif()
+
 add_subdirectory(sdl)
 
 # Cubeb setup, from https://github.com/RPCS3/rpcs3/blob/master/3rdparty/cubeb/CMakeLists.txt
