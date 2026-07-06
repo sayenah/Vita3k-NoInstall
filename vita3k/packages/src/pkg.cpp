@@ -23,6 +23,7 @@
 #include <F00DKeyEncryptorFactory.h>
 #include <PsvPfsParserConfig.h>
 #include <Utils.h>
+#include <miniz.h>
 #include <openssl/evp.h>
 #include <rif2zrif.h>
 
@@ -40,6 +41,7 @@
 
 #include <util/bytes.h>
 #include <util/log.h>
+#include <util/string_utils.h>
 
 // Credits to mmozeiko https://github.com/mmozeiko/pkg2zip
 
@@ -372,11 +374,58 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     return true;
 }
 
-std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &pkg_path, std::string &error_out) {
+// Extract the first .pkg member of a zip to `out_pkg`. Returns false (error_out set) if the zip can't
+// be opened or contains no .pkg.
+static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_pkg, std::string &error_out) {
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_file(&zip, fs_utils::path_to_utf8(zip_path).c_str(), 0)) {
+        error_out = "cannot open zip";
+        return false;
+    }
+
+    int pkg_index = -1;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat) || mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+        const std::string name = string_utils::tolower(stat.m_filename);
+        if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".pkg") == 0) {
+            pkg_index = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (pkg_index < 0) {
+        mz_zip_reader_end(&zip);
+        error_out = "no .pkg found inside the zip";
+        return false;
+    }
+
+    const bool ok = mz_zip_reader_extract_to_file(&zip, pkg_index, fs_utils::path_to_utf8(out_pkg).c_str(), 0);
+    mz_zip_reader_end(&zip);
+    if (!ok)
+        error_out = "failed to extract .pkg from the zip";
+    return ok;
+}
+
+std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
     boost::system::error_code ec;
     const fs::path temp_root = emuenv.cache_path / "pkgplay";
     fs::remove_all(temp_root, ec); // clear any stale temp (e.g. after a crash)
     fs::create_directories(temp_root, ec);
+
+    // Accept a bare .pkg or a .zip containing one; for a zip, extract the .pkg to temp first.
+    fs::path pkg_path = input_path;
+    fs::path extracted_pkg;
+    if (string_utils::tolower(input_path.extension().string()) == ".zip") {
+        extracted_pkg = temp_root / "_src.pkg";
+        if (!extract_pkg_from_zip(input_path, extracted_pkg, error_out)) {
+            fs::remove_all(temp_root, ec);
+            return {};
+        }
+        pkg_path = extracted_pkg;
+    }
 
     // Decrypt the (self-contained NoNpDrm) base-game pkg into temp_root/app; the rif goes to the real
     // ux0/license. Empty zRIF -> install_pkg derives it from the pkg's work.bin.
@@ -386,6 +435,10 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &pkg_path, st
         fs::remove_all(temp_root, ec);
         return {};
     }
+
+    // The extracted source pkg is no longer needed once decrypted.
+    if (!extracted_pkg.empty())
+        fs::remove(extracted_pkg, ec);
 
     const std::string title_id = emuenv.app_info.app_title_id;
     const std::string content_id = emuenv.app_info.app_content_id;
