@@ -587,16 +587,20 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
         }
 
         // Place the license on the real ux0/license so boot can decrypt the game's own modules.
-        // NoNpDrm dumps carry it in app/sce_sys/package/work.bin; also honor any bundled license/*.rif.
-        const fs::path workbin = temp_root / "app/sce_sys/package/work.bin";
-        if (fs::exists(workbin))
-            copy_license(emuenv, workbin);
-        const fs::path lic_dir = temp_root / "license";
-        if (fs::is_directory(lic_dir, ec)) {
-            for (const auto &entry : fs::directory_iterator(lic_dir)) {
-                if (string_utils::tolower(entry.path().extension().string()) == ".rif")
-                    copy_license(emuenv, entry.path());
-            }
+        // NoNpDrm dumps carry it in app/sce_sys/package/work.bin; also honor any bundled *.rif. Match
+        // case-insensitively and recursively: a case-sensitive host (Android/Linux) misses a fixed
+        // "work.bin" path when the dump stored a different case, so key off the lowercased filename/
+        // extension instead of an exact path (this is why desktop, case-insensitive, found the license
+        // but Android did not).
+        for (const auto &entry : fs::recursive_directory_iterator(temp_root, ec)) {
+            if (ec)
+                break;
+            if (!fs::is_regular_file(entry.path()))
+                continue;
+            const std::string fname = string_utils::tolower(entry.path().filename().string());
+            const std::string fext = string_utils::tolower(entry.path().extension().string());
+            if (fname == "work.bin" || fext == ".rif")
+                copy_license(emuenv, entry.path());
         }
     } else {
         // A raw .pkg, or an archive containing one: decrypt into temp_root/app (rif -> ux0/license).
