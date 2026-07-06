@@ -108,6 +108,7 @@ fun AppsListScreen(
     onDismissUpdateCheckResult: () -> Unit,
     onRefresh: () -> Unit,
     onSetRomsFolder: () -> Unit = {},
+    onSetDlcFolder: () -> Unit = {},
     onInstallClick: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenTrophyManager: () -> Unit = {},
@@ -194,6 +195,10 @@ fun AppsListScreen(
                                 onSetRomsFolder = {
                                     showOverflowMenu = false
                                     onSetRomsFolder()
+                                },
+                                onSetDlcFolder = {
+                                    showOverflowMenu = false
+                                    onSetDlcFolder()
                                 },
                                 onTrophyManager = {
                                     showOverflowMenu = false
@@ -663,6 +668,7 @@ private fun AppsListOverflowMenu(
     onExpandedChange: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onSetRomsFolder: () -> Unit,
+    onSetDlcFolder: () -> Unit,
     onTrophyManager: () -> Unit,
     onUserManagement: () -> Unit,
     onWelcomeScreen: () -> Unit,
@@ -699,6 +705,16 @@ private fun AppsListOverflowMenu(
                     )
                 },
                 onClick = onSetRomsFolder
+            )
+            DropdownMenuItem(
+                text = { Text("Set DLCs Folder…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onSetDlcFolder
             )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.apps_list_menu_trophies)) },
