@@ -86,10 +86,10 @@
 #include <QCloseEvent>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLineEdit>
-#include <QFileDialog>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
