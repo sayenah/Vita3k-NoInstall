@@ -33,6 +33,7 @@
 #include <config/state.h>
 #include <emuenv/state.h>
 
+#include <packages/archive_7z.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -531,14 +532,29 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     fs::create_directories(temp_root, ec);
 
     const std::string ext = string_utils::tolower(input_path.extension().string());
+    const bool is_zip = (ext == ".zip");
+    const bool is_7z = (ext == ".7z");
+    const bool is_archive = is_zip || is_7z;
+
+    // Dispatch the archive helpers by container so .zip and .7z are handled uniformly.
+    const auto arch_has_decrypted = [&](const fs::path &p) {
+        return is_7z ? sevenz_has_decrypted_game(p) : zip_has_decrypted_game(p);
+    };
+    const auto arch_extract_all = [&](const fs::path &p, const fs::path &d, std::string &e) {
+        return is_7z ? extract_7z_to_dir(p, d, e) : extract_zip_to_dir(p, d, e);
+    };
+    const auto arch_extract_pkg = [&](const fs::path &p, const fs::path &o, std::string &e) {
+        return is_7z ? extract_pkg_from_7z(p, o, e) : extract_pkg_from_zip(p, o, e);
+    };
+
     std::string title_id;
     std::string content_id;
     std::string category = "gd";
 
-    if (ext == ".zip" && zip_has_decrypted_game(input_path)) {
-        // A zip that already holds a decrypted game tree (no decryption needed): unpack it, then move
-        // the app tree to temp_root/app regardless of how it was nested (app/, app/<TITLEID>/, …).
-        if (!extract_zip_to_dir(input_path, temp_root, error_out)) {
+    if (is_archive && arch_has_decrypted(input_path)) {
+        // An archive that already holds a decrypted game tree (no decryption needed): unpack it, then
+        // move the app tree to temp_root/app regardless of how it was nested (app/, app/<TITLEID>/, …).
+        if (!arch_extract_all(input_path, temp_root, error_out)) {
             fs::remove_all(temp_root, ec);
             return {};
         }
@@ -583,12 +599,12 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
             }
         }
     } else {
-        // A raw .pkg, or a .zip containing one: decrypt into temp_root/app (rif -> real ux0/license).
+        // A raw .pkg, or an archive containing one: decrypt into temp_root/app (rif -> ux0/license).
         fs::path pkg_path = input_path;
         fs::path extracted_pkg;
-        if (ext == ".zip") {
+        if (is_archive) {
             extracted_pkg = temp_root / "_src.pkg";
-            if (!extract_pkg_from_zip(input_path, extracted_pkg, error_out)) {
+            if (!arch_extract_pkg(input_path, extracted_pkg, error_out)) {
                 fs::remove_all(temp_root, ec);
                 return {};
             }

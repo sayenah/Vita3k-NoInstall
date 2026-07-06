@@ -359,7 +359,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
     input->add_option("--bundle", command_line.bundle_path, "Path to a Game Bundle directory to mount and boot directly (dev/testing)")
         ->default_str({})->group("Input");
-    input->add_option("--play-pkg", command_line.play_pkg_path, "Play a game without installing (unpacks to temp, deletes on exit): a NoNpDrm .pkg, or a .zip containing a .pkg or a decrypted app/ folder")
+    input->add_option("--play-pkg", command_line.play_pkg_path, "Play a game without installing (unpacks to temp, deletes on exit): a NoNpDrm .pkg, or a .zip/.7z containing a .pkg or a decrypted app/ folder")
         ->default_str({})->group("Input");
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
         ->default_str({})->group("Input");
