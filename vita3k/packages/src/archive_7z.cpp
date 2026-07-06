@@ -110,7 +110,6 @@ public:
             return false;
 
         FileInStream_CreateVTable(&archive_stream);
-        archive_stream.wres = 0;
         LookToRead2_CreateVTable(&look_stream, False);
         look_stream.buf = static_cast<Byte *>(ISzAlloc_Alloc(&alloc_main, k_input_buf_size));
         if (!look_stream.buf) {
