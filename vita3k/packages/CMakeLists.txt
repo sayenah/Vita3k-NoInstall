@@ -1,5 +1,6 @@
 add_library(packages STATIC
             src/archive_7z.cpp
+            src/archive_read.cpp
             src/exfat.cpp
             src/license.cpp
             src/pkg.cpp
@@ -7,6 +8,7 @@ add_library(packages STATIC
             src/sce_utils.cpp
             src/sfo.cpp
             include/packages/archive_7z.h
+            include/packages/archive_read.h
             include/packages/exfat.h
             include/packages/license.h
             include/packages/functions.h

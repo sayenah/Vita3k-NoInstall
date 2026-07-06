@@ -23,7 +23,9 @@
 #pragma once
 
 #include <emuenv/state.h>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 // Credits to mmozeiko https://github.com/mmozeiko/pkg2zip
 
@@ -87,6 +89,10 @@ struct PkgEntry {
 // sce_sys/package/work.bin is used to derive one.
 bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback = nullptr, const fs::path &temp_root = {});
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path);
+
+// Reads the metadata param.sfo out of a pkg's info section (no decryption). For a games-list scan:
+// gives title/title_id/category cheaply. Returns false if not a valid pkg or it has no sfo.
+bool read_pkg_param_sfo(const fs::path &pkg_path, std::vector<uint8_t> &sfo_out);
 bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path);
 
 // Decrypts a self-contained (NoNpDrm) base-game pkg to a private temp dir, drops its license rif on

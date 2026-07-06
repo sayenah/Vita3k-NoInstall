@@ -210,6 +210,26 @@ bool extract_7z_to_dir(const fs::path &archive_path, const fs::path &dst_dir, st
     return true;
 }
 
+bool read_7z_entry(const fs::path &archive_path, const std::string &suffix_lower, std::vector<uint8_t> &out) {
+    SevenZReader r;
+    if (!r.open(archive_path))
+        return false;
+    for (UInt32 i = 0; i < r.num_files(); i++) {
+        if (r.is_dir(i))
+            continue;
+        const std::string name = string_utils::tolower(r.name(i));
+        if (name.size() >= suffix_lower.size() && name.compare(name.size() - suffix_lower.size(), suffix_lower.size(), suffix_lower) == 0) {
+            const Byte *data = nullptr;
+            size_t size = 0;
+            if (!r.extract(i, &data, &size))
+                return false;
+            out.assign(data, data + size);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool extract_pkg_from_7z(const fs::path &archive_path, const fs::path &out_pkg, std::string &error_out) {
     SevenZReader r;
     if (!r.open(archive_path)) {

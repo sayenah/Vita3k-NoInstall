@@ -22,7 +22,9 @@
 
 #include <util/fs.h>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 // True if the 7z contains a decrypted game tree (has an sce_sys/param.sfo entry) rather than a .pkg.
 bool sevenz_has_decrypted_game(const fs::path &archive_path);
@@ -32,3 +34,7 @@ bool extract_7z_to_dir(const fs::path &archive_path, const fs::path &dst_dir, st
 
 // Extract the first .pkg member of a 7z to out_pkg. error_out set on failure / no .pkg.
 bool extract_pkg_from_7z(const fs::path &archive_path, const fs::path &out_pkg, std::string &error_out);
+
+// Read the first member whose lowercased name ends with `suffix_lower` into `out` (in memory).
+// Returns false if the archive can't be opened or no such member exists. Used for metadata scans.
+bool read_7z_entry(const fs::path &archive_path, const std::string &suffix_lower, std::vector<uint8_t> &out);

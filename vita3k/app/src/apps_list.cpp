@@ -170,8 +170,11 @@ static bool write_apps_cache_file(const EmuEnvState &emuenv, const std::vector<A
     }
 
     auto apps_node = root.append_child("apps");
-    for (const auto &app : apps)
+    for (const auto &app : apps) {
+        if (!app.archive_path.empty())
+            continue; // ROM-folder entries are rescanned live, never cached
         write_app_cache_entry(apps_node, app);
+    }
 
     if (!doc.save_file(cache_path.c_str())) {
         LOG_ERROR("Failed to write apps cache to {}", cache_path);

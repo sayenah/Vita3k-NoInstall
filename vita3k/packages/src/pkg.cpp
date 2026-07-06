@@ -656,6 +656,44 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     return title_id;
 }
 
+bool read_pkg_param_sfo(const fs::path &pkg_path, std::vector<uint8_t> &sfo_out) {
+    FILE *infile = FOPEN(pkg_path.c_str(), "rb");
+    if (!infile)
+        return false;
+
+    PkgHeader pkg_header{};
+    if (fread(&pkg_header, sizeof(PkgHeader), 1, infile) != 1 || byte_swap(pkg_header.magic) != 0x7F504b47) {
+        fclose(infile);
+        return false;
+    }
+
+    uint32_t info_offset = byte_swap(pkg_header.info_offset);
+    uint32_t sfo_offset = 0;
+    uint32_t sfo_size = 0;
+    for (uint32_t i = 0; i < byte_swap(pkg_header.info_count); i++) {
+        uint32_t block[4];
+        fseek(infile, info_offset, SEEK_SET);
+        if (fread(block, sizeof(block), 1, infile) != 1)
+            break;
+        if (byte_swap(block[0]) == 14) { // param.sfo record
+            sfo_offset = byte_swap(block[2]);
+            sfo_size = byte_swap(block[3]);
+        }
+        info_offset += 2 * sizeof(uint32_t) + byte_swap(block[1]);
+    }
+
+    if (sfo_size == 0) {
+        fclose(infile);
+        return false;
+    }
+
+    sfo_out.resize(sfo_size);
+    fseek(infile, sfo_offset, SEEK_SET);
+    const bool ok = fread(sfo_out.data(), sfo_size, 1, infile) == 1;
+    fclose(infile);
+    return ok;
+}
+
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path) {
     FILE *infile = FOPEN(pkg_path.c_str(), "rb");
     if (!infile)
