@@ -24,10 +24,23 @@
 #include <map>
 #include <unordered_map>
 
+// Game Bundle mount types (see io/bundle.h). Forward-declared and held behind shared_ptr so state.h
+// stays free of a circular include; bundle.h includes state.h, not the reverse.
+namespace bundle {
+class EntryReader;
+class DirReader;
+} // namespace bundle
+struct BundleMount;
+
 // Class for all needed information to access files on Vita3K.
 class FileStats : public VitaStats {
     // Shared file pointer
     FilePtr wrapped_file;
+
+    // When set, this fd is served read-only from a mounted Game Bundle instead of a host file;
+    // wrapped_file is then null and read/seek/tell operate on this reader + cursor.
+    std::shared_ptr<bundle::EntryReader> bundle_reader;
+    mutable SceOff bundle_cursor = 0;
 
 public:
     // Constructor used for files
@@ -41,6 +54,25 @@ public:
         file_info.open_mode = open;
         file_info.file_mode = SCE_SO_IFREG | SCE_SO_IROTH;
         file_info.access_mode = SCE_S_IFREG;
+    }
+
+    // Constructor used for read-only files served from a mounted Game Bundle (no host file).
+    explicit FileStats(const char *vita, const std::string &t, std::shared_ptr<bundle::EntryReader> reader) {
+        bundle_reader = std::move(reader);
+
+        file_info.vita_loc = vita;
+        file_info.translated = t;
+        file_info.open_mode = SCE_O_RDONLY;
+        file_info.file_mode = SCE_SO_IFREG | SCE_SO_IROTH;
+        file_info.access_mode = SCE_S_IFREG;
+    }
+
+    bool is_bundle_file() const {
+        return static_cast<bool>(bundle_reader);
+    }
+
+    const std::shared_ptr<bundle::EntryReader> &get_bundle_reader() const {
+        return bundle_reader;
     }
 
     bool is_regular_file() const {
@@ -73,6 +105,9 @@ class DirStats : public VitaStats {
     // Shared directory pointer
     DirPtr dir_ptr;
 
+    // When set, this dir fd is served from a mounted Game Bundle instead of the host FS.
+    std::shared_ptr<bundle::DirReader> bundle_dir;
+
 public:
     DirStats(const char *vita, const std::string &t, const fs::path &file, DirPtr ptr) {
         dir_ptr = std::move(ptr);
@@ -85,8 +120,27 @@ public:
         file_info.access_mode = SCE_S_IFDIR | SCE_S_IRUSR;
     }
 
+    // Constructor used for directories served from a mounted Game Bundle (no host dir).
+    DirStats(const char *vita, const std::string &t, std::shared_ptr<bundle::DirReader> dir) {
+        bundle_dir = std::move(dir);
+
+        file_info.vita_loc = vita;
+        file_info.translated = t;
+        file_info.open_mode = SCE_O_RDONLY;
+        file_info.file_mode = SCE_SO_IFDIR | SCE_SO_IROTH;
+        file_info.access_mode = SCE_S_IFDIR | SCE_S_IRUSR;
+    }
+
     auto get_dir_ptr() const {
         return get_system_dir_ptr(dir_ptr);
+    }
+
+    bool is_bundle_dir() const {
+        return static_cast<bool>(bundle_dir);
+    }
+
+    const std::shared_ptr<bundle::DirReader> &get_bundle_dir() const {
+        return bundle_dir;
     }
 
     bool is_directory() const {
@@ -128,4 +182,8 @@ struct IOState {
     SceUID next_overlay_id = 1;
     // overlay in the order they should be applied
     std::vector<FiosOverlay> overlays;
+
+    // Active read-only Game Bundle mount for the running title (see io/bundle.h). Null when the
+    // running app is a normal installed app. Set at boot, cleared in io_deinit.
+    std::shared_ptr<BundleMount> mount;
 };
