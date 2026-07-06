@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -106,6 +107,7 @@ fun AppsListScreen(
     onCheckForUpdates: () -> Unit,
     onDismissUpdateCheckResult: () -> Unit,
     onRefresh: () -> Unit,
+    onSetRomsFolder: () -> Unit = {},
     onInstallClick: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenTrophyManager: () -> Unit = {},
@@ -188,6 +190,10 @@ fun AppsListScreen(
                                 onRefresh = {
                                     showOverflowMenu = false
                                     onRefresh()
+                                },
+                                onSetRomsFolder = {
+                                    showOverflowMenu = false
+                                    onSetRomsFolder()
                                 },
                                 onTrophyManager = {
                                     showOverflowMenu = false
@@ -656,6 +662,7 @@ private fun AppsListOverflowMenu(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onRefresh: () -> Unit,
+    onSetRomsFolder: () -> Unit,
     onTrophyManager: () -> Unit,
     onUserManagement: () -> Unit,
     onWelcomeScreen: () -> Unit,
@@ -682,6 +689,16 @@ private fun AppsListOverflowMenu(
                     )
                 },
                 onClick = onRefresh
+            )
+            DropdownMenuItem(
+                text = { Text("Set ROMs Folder…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onSetRomsFolder
             )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.apps_list_menu_trophies)) },

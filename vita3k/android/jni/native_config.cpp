@@ -671,6 +671,27 @@ Java_org_vita3k_emulator_NativeLib_setCurrentEmulatorPath(JNIEnv *env, jclass, j
     return JNI_TRUE;
 }
 
+// Sets the ROMs folder, persists it, rescans, and returns the names of any files that failed to load.
+JNIEXPORT jobjectArray JNICALL
+Java_org_vita3k_emulator_NativeLib_setRomsFolder(JNIEnv *env, jclass, jstring path_str) {
+    jclass string_class = env->FindClass("java/lang/String");
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return env->NewObjectArray(0, string_class, nullptr);
+
+    emuenv->cfg.roms_folder = path_str ? jstring_to_string(env, path_str) : std::string();
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+
+    const auto failures = app::scan_roms(*emuenv);
+    jobjectArray result = env->NewObjectArray(static_cast<jsize>(failures.size()), string_class, nullptr);
+    for (jsize i = 0; i < static_cast<jsize>(failures.size()); ++i) {
+        jstring failure = env->NewStringUTF(failures[static_cast<size_t>(i)].c_str());
+        env->SetObjectArrayElement(result, i, failure);
+        env->DeleteLocalRef(failure);
+    }
+    return result;
+}
+
 JNIEXPORT jintArray JNICALL
 Java_org_vita3k_emulator_NativeLib_saveSettings(JNIEnv *env, jclass, jstring title_id_str, jobject config_obj) {
     auto *emuenv = get_emuenv();

@@ -64,6 +64,7 @@
 #include <np/state.h>
 #include <packages/functions.h>
 #include <packages/license.h>
+#include <packages/pkg.h>
 #include <renderer/functions.h>
 #include <renderer/shaders.h>
 #include <renderer/state.h>
@@ -88,6 +89,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLineEdit>
+#include <QFileDialog>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
@@ -866,6 +868,22 @@ void MainWindow::init_current_user() {
 }
 
 void MainWindow::on_app_selected(const app::AppEntry &app) {
+    // ROM entry: mount the archive read-only (no install) and boot the returned title id. set_app_info
+    // resolves the boot fields from the mount manifest, so nothing downstream needs to change.
+    if (!app.archive_path.empty()) {
+        std::string error;
+        const std::string title_id = mount_pkg_for_play(emuenv, fs_utils::utf8_to_path(app.archive_path), error);
+        if (title_id.empty()) {
+            QMessageBox::critical(this, tr("Cannot play game"),
+                tr("Failed to load '%1':\n%2")
+                    .arg(QString::fromStdString(app.title))
+                    .arg(QString::fromStdString(error)));
+            return;
+        }
+        boot_game(title_id);
+        return;
+    }
+
     if (emuenv.cfg.show_live_area_screen && !m_game_window)
         show_live_area(app.title_id);
     else
@@ -1446,6 +1464,17 @@ void MainWindow::setup_toolbar() {
             if (!fs::exists(elfdumps_path))
                 fs::create_directories(elfdumps_path);
             gui::utils::open_dir(elfdumps_path);
+        });
+
+        menu.addSeparator();
+        menu.addAction(tr("Set ROMs Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of games (.zip/.7z/.pkg)"),
+                QString::fromStdString(emuenv.cfg.roms_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.roms_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            m_apps_list_widget->refresh(true); // rescans and reports any unreadable files
         });
 
         menu.exec(pos);
