@@ -26,6 +26,7 @@
 #include <openssl/evp.h>
 #include <rif2zrif.h>
 
+#include <io/bundle.h>
 #include <io/functions.h>
 
 #include <config/state.h>
@@ -76,7 +77,8 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     return true;
 }
 
-bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback) {
+bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback, const fs::path &temp_root) {
+    const bool temp_mode = !temp_root.empty();
     FILE *infile = FOPEN(pkg_path.c_str(), "rb");
     if (!infile) {
         LOG_CRITICAL("Failed to load pkg file in path: {}", fs_utils::path_to_utf8(pkg_path));
@@ -211,11 +213,17 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         type = PkgType::PKG_TYPE_VITA_PATCH;
     }
 
-    auto path{ emuenv.vita_fs_path / "ux0" };
+    if (temp_mode && type != PkgType::PKG_TYPE_VITA_APP) {
+        LOG_ERROR("Play-without-install only supports base-game pkgs (got content type {})", content_type);
+        return false;
+    }
+
+    // temp_mode decrypts the app tree into temp_root/app (mounted read-only, no ux0/app install).
+    auto path{ temp_mode ? temp_root : emuenv.vita_fs_path / "ux0" };
 
     switch (type) {
     case PkgType::PKG_TYPE_VITA_APP:
-        path /= fs::path("app") / emuenv.app_info.app_title_id;
+        path /= temp_mode ? fs::path("app") : fs::path("app") / emuenv.app_info.app_title_id;
         if (fs::exists(path))
             fs::remove_all(path);
         emuenv.app_info.app_title += " (App)";
@@ -304,6 +312,15 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     fs::path title_id_src = path;
     fs::path title_id_dst = fs_utils::path_concat(path, "_dec");
     std::string zRIF = p_zRIF;
+
+    // Self-contained NoNpDrm dumps carry their license in sce_sys/package/work.bin. When no external
+    // zRIF was supplied, derive one from work.bin so the PFS layer decrypts without a separate key.
+    const auto workbin_path = path / "sce_sys/package/work.bin";
+    if (zRIF.empty() && fs::exists(workbin_path)) {
+        fs::ifstream binfile(workbin_path, std::ios::in | std::ios::binary | std::ios::ate);
+        zRIF = rif2zrif(binfile);
+    }
+
     F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
     std::string f00d_arg = std::string();
 
@@ -344,13 +361,60 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         break;
     }
 
-    if (!copy_path(title_id_src, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
+    // temp_mode keeps the decrypted tree in temp_root (no ux0/app install); copy_path would relocate
+    // it into ux0/app, so skip it. The license (below) still goes to the real ux0/license.
+    if (!temp_mode && !copy_path(title_id_src, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
         return false;
 
     create_license(emuenv, zRIF);
 
     progress_callback(100);
     return true;
+}
+
+std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &pkg_path, std::string &error_out) {
+    boost::system::error_code ec;
+    const fs::path temp_root = emuenv.cache_path / "pkgplay";
+    fs::remove_all(temp_root, ec); // clear any stale temp (e.g. after a crash)
+    fs::create_directories(temp_root, ec);
+
+    // Decrypt the (self-contained NoNpDrm) base-game pkg into temp_root/app; the rif goes to the real
+    // ux0/license. Empty zRIF -> install_pkg derives it from the pkg's work.bin.
+    std::string zrif;
+    if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
+        error_out = "failed to decrypt pkg (expected a self-contained NoNpDrm base-game pkg)";
+        fs::remove_all(temp_root, ec);
+        return {};
+    }
+
+    const std::string title_id = emuenv.app_info.app_title_id;
+    const std::string content_id = emuenv.app_info.app_content_id;
+    std::string category = emuenv.app_info.app_category;
+    if (category.empty())
+        category = "gd";
+
+    // Emit the bundle manifest so the existing directory-backend mount can open temp_root.
+    {
+        fs::ofstream mf(temp_root / "vita3k_bundle.json", std::ios::out | std::ios::binary);
+        mf << "{\"version\":1,\"title_id\":\"" << title_id << "\",\"content_id\":\"" << content_id
+           << "\",\"category\":\"" << category << "\",\"has_patch\":false,\"dlc\":[]}";
+    }
+
+    bundle::Manifest manifest;
+    std::string berr;
+    auto backend = bundle::open_directory_backend(temp_root, manifest, berr);
+    if (!backend) {
+        error_out = "failed to mount decrypted pkg: " + berr;
+        fs::remove_all(temp_root, ec);
+        return {};
+    }
+
+    auto mount = bundle::make_mount(backend, manifest);
+    mount->owned_temp = temp_root;
+    emuenv.io.mount = mount;
+
+    LOG_INFO("Decrypted pkg [{}] to temp for play-without-install ({})", title_id, fs_utils::path_to_utf8(pkg_path));
+    return title_id;
 }
 
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path) {

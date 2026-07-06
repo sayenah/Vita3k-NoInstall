@@ -154,6 +154,12 @@ void io_deinit(IOState &io) {
 
     io.cachemap.clear();
 
+    // Delete any temp tree the mount owns (a pkg decrypted for play-without-install) before dropping
+    // the mount, so nothing persists after the game stops.
+    if (io.mount && !io.mount->owned_temp.empty()) {
+        boost::system::error_code ec;
+        fs::remove_all(io.mount->owned_temp, ec);
+    }
     io.mount.reset();
 
     {

@@ -35,6 +35,8 @@ struct Config {
     std::optional<std::string> pup_path;
     // Dev/testing: path to a Game Bundle directory to mount and boot directly (P0 directory backend).
     std::optional<fs::path> bundle_path;
+    // Path to a self-contained NoNpDrm .pkg to decrypt-to-temp and play without permanently installing.
+    std::optional<fs::path> play_pkg_path;
     std::optional<bool> system_music;
 
     // Setting not present in the YAML file

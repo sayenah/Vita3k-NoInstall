@@ -102,6 +102,10 @@ struct BundleMount {
     std::string app_prefix; // "app/" + title_id     (matches translated app0: paths)
     std::string addcont_prefix; // "addcont/" + title_id (matches translated addcont0: paths)
 
+    // If non-empty, a temporary directory this mount owns (e.g. a pkg decrypted for play-without-
+    // install). io_deinit deletes it when the mount is cleared, so nothing persists after play.
+    fs::path owned_temp;
+
     // Map a ux0-relative path (post-translate_path, forward-slash) to a bundle key. nullopt if the
     // path is not under a virtualized root (savedata, other devices, other titles).
     std::optional<std::string> map_ux0_path(std::string_view ux0_rel) const;

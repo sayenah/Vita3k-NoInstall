@@ -289,6 +289,19 @@ int main(int argc, char *argv[]) {
         LOG_INFO("Mounted Game Bundle [{}] from {}; booting directly", manifest.title_id, emuenv.cfg.bundle_path->string());
     }
 
+    // Play a self-contained NoNpDrm pkg with no permanent install: decrypt to temp, mount, boot;
+    // the temp tree is deleted when the game stops (io_deinit).
+    if (emuenv.cfg.play_pkg_path.has_value()) {
+        std::string play_error;
+        const std::string title_id = mount_pkg_for_play(emuenv, *emuenv.cfg.play_pkg_path, play_error);
+        if (title_id.empty()) {
+            LOG_CRITICAL("Failed to play pkg {}: {}", emuenv.cfg.play_pkg_path->string(), play_error);
+            return 1;
+        }
+        emuenv.cfg.run_app_path = title_id;
+        LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
+    }
+
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
     auto gui_settings = std::make_shared<GuiSettings>(gui_configs_dir);
     auto persistent_settings = std::make_shared<PersistentSettings>(gui_configs_dir);
