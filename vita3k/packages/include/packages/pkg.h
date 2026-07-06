@@ -22,8 +22,8 @@
 
 #pragma once
 
-#include <emuenv/state.h>
 #include <cstdint>
+#include <emuenv/state.h>
 #include <string>
 #include <vector>
 
