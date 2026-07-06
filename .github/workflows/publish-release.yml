@@ -1,8 +1,10 @@
 name: Publish Release
 
-# After a Build CI run succeeds on our branch, grab the Android + Windows artifacts and
-# (re)publish them as the "latest" GitHub Release, so they're downloadable from the
-# Releases page with no GitHub login. Pull-request builds are ignored.
+# After a Build CI run on our branch, grab whatever platform artifacts it produced and
+# (re)publish them as the "latest" GitHub Release, downloadable with no GitHub login.
+# It does NOT require the whole matrix to pass -- the macOS runners fail on pre-existing
+# infra, which would otherwise block Android/Windows from ever being released. It publishes
+# whatever artifacts exist. Pull-request builds are ignored.
 
 on:
   workflow_run:
@@ -13,15 +15,19 @@ permissions:
   contents: write # create/replace the release
   actions: read # read the triggering run's artifacts
 
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
 jobs:
   release:
     if: >
-      github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'feature/game-bundle' &&
       github.event.workflow_run.event != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Download Android artifact
+        continue-on-error: true # a failed platform simply won't have an artifact
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
@@ -30,6 +36,7 @@ jobs:
           path: artifacts
 
       - name: Download Windows artifact
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
@@ -63,7 +70,8 @@ jobs:
         run: |
           SHA="${{ github.event.workflow_run.head_sha }}"
           if [ -z "$(ls -A out 2>/dev/null)" ]; then
-            echo "::error::nothing to release"; exit 1
+            echo "::warning::no Android/Windows artifacts on this build run -- nothing to publish, leaving the existing release in place"
+            exit 0
           fi
           gh release delete latest -R "${{ github.repository }}" --yes --cleanup-tag || true
           gh release create latest -R "${{ github.repository }}" out/* \
