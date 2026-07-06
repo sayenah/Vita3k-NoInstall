@@ -374,34 +374,91 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     return true;
 }
 
-// True if the zip contains an "app/" folder (a decrypted game tree, i.e. a Game Bundle zip) rather
-// than a raw .pkg.
-static bool zip_has_app_folder(const fs::path &zip_path) {
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_file(&zip, fs_utils::path_to_utf8(zip_path).c_str(), 0))
+// True if the zip contains a decrypted game tree (has an sce_sys/param.sfo entry) rather than a .pkg.
+static bool zip_has_decrypted_game(const fs::path &zip_path) {
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp)
         return false;
-    bool has_app = false;
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        return false;
+    }
+    bool found = false;
     const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
-    for (mz_uint i = 0; i < num_files && !has_app; i++) {
+    for (mz_uint i = 0; i < num_files && !found; i++) {
         mz_zip_archive_file_stat stat;
         if (!mz_zip_reader_file_stat(&zip, i, &stat))
             continue;
         const std::string name = string_utils::tolower(stat.m_filename);
-        if (name.rfind("app/", 0) == 0) // entry starts with "app/"
-            has_app = true;
+        if (name.size() >= 17 && name.compare(name.size() - 17, 17, "sce_sys/param.sfo") == 0)
+            found = true;
     }
     mz_zip_reader_end(&zip);
-    return has_app;
+    fclose(fp);
+    return found;
+}
+
+// After extracting a decrypted-game zip into temp_root, find the app tree (the dir holding
+// sce_sys/param.sfo) wherever it sits (app/, app/<TITLEID>/, <TITLEID>/, …) and move it to
+// temp_root/app so the directory-backend mount can serve it. Renames within temp are cheap.
+static bool normalize_app_tree(const fs::path &temp_root, std::string &error_out) {
+    boost::system::error_code ec;
+    fs::path app_dir;
+    for (fs::recursive_directory_iterator it(temp_root, ec), end; it != end; it.increment(ec)) {
+        if (ec)
+            break;
+        const fs::path p = it->path();
+        if (p.filename() == "param.sfo" && p.parent_path().filename() == "sce_sys") {
+            app_dir = p.parent_path().parent_path();
+            break;
+        }
+    }
+    if (app_dir.empty()) {
+        error_out = "no sce_sys/param.sfo found inside the zip";
+        return false;
+    }
+
+    const fs::path canonical_app = temp_root / "app";
+    if (fs::equivalent(app_dir, canonical_app, ec) && !ec)
+        return true; // already at temp_root/app
+
+    if (fs::equivalent(app_dir, temp_root, ec) && !ec) {
+        error_out = "unexpected zip layout (game files at the zip root)";
+        return false;
+    }
+
+    const fs::path stage = temp_root / "__app_stage";
+    fs::remove_all(stage, ec);
+    fs::rename(app_dir, stage, ec);
+    if (ec) {
+        error_out = "failed to relocate app tree";
+        return false;
+    }
+    fs::remove_all(canonical_app, ec); // clear whatever held the app tree (e.g. app/<TITLEID> parent)
+    fs::rename(stage, canonical_app, ec);
+    if (ec) {
+        error_out = "failed to place app tree";
+        return false;
+    }
+    return true;
 }
 
 // Extract every member of a zip into dst_dir (preserving its tree). Returns false (error_out set) on
 // any failure.
 static bool extract_zip_to_dir(const fs::path &zip_path, const fs::path &dst_dir, std::string &error_out) {
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_file(&zip, fs_utils::path_to_utf8(zip_path).c_str(), 0)) {
-        error_out = "cannot open zip";
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp) {
+        error_out = "cannot open zip file";
         return false;
     }
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        error_out = "not a valid zip archive";
+        return false;
+    }
+    bool ok = true;
     const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
     for (mz_uint i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat stat;
@@ -414,21 +471,28 @@ static bool extract_zip_to_dir(const fs::path &zip_path, const fs::path &dst_dir
         }
         fs::create_directories(out_path.parent_path());
         if (!mz_zip_reader_extract_to_file(&zip, i, fs_utils::path_to_utf8(out_path).c_str(), 0)) {
-            mz_zip_reader_end(&zip);
             error_out = std::string("failed to extract ") + stat.m_filename;
-            return false;
+            ok = false;
+            break;
         }
     }
     mz_zip_reader_end(&zip);
-    return true;
+    fclose(fp);
+    return ok;
 }
 
 // Extract the first .pkg member of a zip to `out_pkg`. Returns false (error_out set) if the zip can't
 // be opened or contains no .pkg.
 static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_pkg, std::string &error_out) {
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp) {
+        error_out = "cannot open zip file";
+        return false;
+    }
     mz_zip_archive zip{};
-    if (!mz_zip_reader_init_file(&zip, fs_utils::path_to_utf8(zip_path).c_str(), 0)) {
-        error_out = "cannot open zip";
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        error_out = "not a valid zip archive";
         return false;
     }
 
@@ -447,12 +511,14 @@ static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_p
 
     if (pkg_index < 0) {
         mz_zip_reader_end(&zip);
+        fclose(fp);
         error_out = "no .pkg found inside the zip";
         return false;
     }
 
     const bool ok = mz_zip_reader_extract_to_file(&zip, pkg_index, fs_utils::path_to_utf8(out_pkg).c_str(), 0);
     mz_zip_reader_end(&zip);
+    fclose(fp);
     if (!ok)
         error_out = "failed to extract .pkg from the zip";
     return ok;
@@ -469,10 +535,14 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     std::string content_id;
     std::string category = "gd";
 
-    if (ext == ".zip" && zip_has_app_folder(input_path)) {
-        // A zip that already holds a decrypted game tree (a Game Bundle zip): just unpack it, no
-        // decryption needed. Identity comes from an included manifest, else from the app's param.sfo.
+    if (ext == ".zip" && zip_has_decrypted_game(input_path)) {
+        // A zip that already holds a decrypted game tree (no decryption needed): unpack it, then move
+        // the app tree to temp_root/app regardless of how it was nested (app/, app/<TITLEID>/, …).
         if (!extract_zip_to_dir(input_path, temp_root, error_out)) {
+            fs::remove_all(temp_root, ec);
+            return {};
+        }
+        if (!normalize_app_tree(temp_root, error_out)) {
             fs::remove_all(temp_root, ec);
             return {};
         }
@@ -500,7 +570,11 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
                 category = info.app_category;
         }
 
-        // Copy any license rifs the bundle carries onto the real ux0/license so boot finds them.
+        // Place the license on the real ux0/license so boot can decrypt the game's own modules.
+        // NoNpDrm dumps carry it in app/sce_sys/package/work.bin; also honor any bundled license/*.rif.
+        const fs::path workbin = temp_root / "app/sce_sys/package/work.bin";
+        if (fs::exists(workbin))
+            copy_license(emuenv, workbin);
         const fs::path lic_dir = temp_root / "license";
         if (fs::is_directory(lic_dir, ec)) {
             for (const auto &entry : fs::directory_iterator(lic_dir)) {
