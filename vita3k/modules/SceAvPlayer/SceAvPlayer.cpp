@@ -18,6 +18,8 @@
 #include <module/module.h>
 
 #include <codec/state.h>
+#include <io/bundle.h>
+#include <io/device.h>
 #include <io/functions.h>
 #include <kernel/state.h>
 
@@ -273,6 +275,25 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
             return -1;
         }
         file_path = temp_file_path;
+    }
+
+    // Media that lives in a mounted Game Bundle and whose game supplied no IO callbacks: extract it
+    // from the bundle to a temp cache file the ffmpeg player can open directly.
+    if (!fs::exists(file_path) && emuenv.io.mount) {
+        const char *vita_path = path.get(emuenv.mem);
+        auto media_device = device::get_device(vita_path);
+        const auto translated = translate_path(vita_path, media_device, emuenv.io.device_paths);
+        std::vector<uint8_t> media;
+        const auto handled = bundle::try_read_ux0_file(emuenv.io, translated, media);
+        if (handled && *handled) {
+            fs::create_directories(emuenv.cache_path);
+            const auto temp_file_path = emuenv.cache_path / "temp_vita_media_bundle.mp4";
+            fs::ofstream temp_file(temp_file_path, std::ios::out | std::ios::binary);
+            if (!media.empty())
+                temp_file.write(reinterpret_cast<const char *>(media.data()), static_cast<std::streamsize>(media.size()));
+            temp_file.close();
+            file_path = temp_file_path;
+        }
     }
 
     player_info->player.queue(file_path.string());

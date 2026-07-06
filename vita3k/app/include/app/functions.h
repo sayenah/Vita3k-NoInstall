@@ -80,6 +80,11 @@ void destroy(EmuEnvState &emuenv);
 
 bool init_apps_list(EmuEnvState &emuenv);
 bool scan_apps(EmuEnvState &emuenv);
+
+// Scans the configured ROMs folder (cfg.roms_folder) for .zip/.7z/.pkg games and appends a games-list
+// row for each (real title + extracted icon), routed at launch through mount_pkg_for_play. Returns
+// the filenames it could not read, so the UI can report them. Safe to call repeatedly (idempotent).
+std::vector<std::string> scan_roms(EmuEnvState &emuenv);
 bool load_cached_apps(EmuEnvState &emuenv);
 void save_apps_cache(EmuEnvState &emuenv);
 AppEntry read_app_info(EmuEnvState &emuenv, const std::string &title_id);

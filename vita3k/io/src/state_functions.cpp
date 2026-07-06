@@ -26,6 +26,7 @@
 #include <unistd.h>
 #endif
 
+#include <io/bundle.h>
 #include <io/state.h>
 
 static const uint32_t page_size = []() -> uint32_t {
@@ -39,9 +40,6 @@ static const uint32_t page_size = []() -> uint32_t {
 }();
 
 SceOff FileStats::read(void *input_data, const int element_size, const SceSize element_count) const {
-    if (!wrapped_file)
-        return -1;
-
     if (element_size == 0 || element_count == 0)
         return 0;
 
@@ -54,6 +52,19 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
         input_addr[i] = 0;
     input_addr[element_size * element_count - 1] = 0;
 
+    // Read-only files served from a mounted Game Bundle: random-access read at the fd cursor.
+    if (bundle_reader) {
+        const uint64_t want = static_cast<uint64_t>(element_size) * static_cast<uint64_t>(element_count);
+        const int64_t got = bundle_reader->pread(input_data, static_cast<uint64_t>(bundle_cursor), want);
+        if (got < 0)
+            return -1;
+        bundle_cursor += got;
+        return static_cast<SceOff>(got / element_size);
+    }
+
+    if (!wrapped_file)
+        return -1;
+
     return fread(input_data, element_size, element_count, wrapped_file.get());
 }
 
@@ -65,6 +76,8 @@ SceOff FileStats::write(const void *data, const SceSize size, const int count) c
 }
 
 int FileStats::truncate(const SceSize size) const {
+    if (bundle_reader) // read-only bundle files cannot be truncated
+        return -1;
 #ifdef _WIN32
     return _chsize_s(_fileno(get_file_pointer()), size);
 #else
@@ -73,6 +86,22 @@ int FileStats::truncate(const SceSize size) const {
 }
 
 bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
+    // Read-only files served from a mounted Game Bundle: move the fd cursor.
+    if (bundle_reader) {
+        SceOff origin;
+        switch (seek_mode) {
+        case SCE_SEEK_SET: origin = 0; break;
+        case SCE_SEEK_CUR: origin = bundle_cursor; break;
+        case SCE_SEEK_END: origin = static_cast<SceOff>(bundle_reader->size()); break;
+        default: return false;
+        }
+        const SceOff target = origin + offset;
+        if (target < 0)
+            return false;
+        bundle_cursor = target; // seeking past EOF is allowed; reads clamp at size
+        return true;
+    }
+
     if (!wrapped_file)
         return false;
 
@@ -99,6 +128,9 @@ bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
 }
 
 SceOff FileStats::tell() const {
+    if (bundle_reader)
+        return bundle_cursor;
+
     if (!wrapped_file)
         return -1;
 

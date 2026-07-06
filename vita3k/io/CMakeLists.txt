@@ -1,6 +1,7 @@
 add_library(
 	io
 	STATIC
+	include/io/bundle.h
 	include/io/device.h
 	include/io/filesystem.h
 	include/io/functions.h
@@ -10,6 +11,7 @@ add_library(
 	include/io/util.h
 	include/io/vfs.h
 	include/io/VitaIoDevice.h
+	src/bundle.cpp
 	src/device.cpp
 	src/filesystem.cpp
 	src/io.cpp

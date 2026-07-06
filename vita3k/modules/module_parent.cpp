@@ -23,6 +23,7 @@
 
 #include <cpu/functions.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/device.h>
 #include <io/state.h>
 #include <io/vfs.h>
@@ -264,7 +265,16 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         }
     }
 
-    if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
+    // A mounted Game Bundle serves app0:/addcont0: modules from a decrypted temp tree, so they never
+    // exist on the host ux0/app path. The case-insensitive fallback below probes the host FS and bails
+    // with ENOENT (line ~283) *before* the mount read (line ~292) — but only on case-sensitive hosts
+    // (Android/Linux) where case_isens_find_enabled is set, which is why desktop worked and Android did
+    // not. Skip the host-FS fallback when the mount already covers this path; io.cpp::open_file checks
+    // the mount first for exactly this reason.
+    const bool covered_by_mount = emuenv.io.mount
+        && emuenv.io.mount->map_ux0_path(translated_module_path.generic_string()).has_value();
+
+    if (!covered_by_mount && emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
         // Attempt a case-insensitive file search.
         const auto original_translated_module_path = translated_module_path;
         const auto cached_path = find_in_cache(emuenv.io, string_utils::tolower(translated_module_path.string()));
@@ -287,10 +297,14 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
 
     vfs::FileBuffer module_buffer;
     bool res;
-    if (device == VitaIoDevice::app0)
-        res = vfs::read_app_file(module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
-    else
+    // Serve app0: modules from a mounted Game Bundle when covered; otherwise read from the host FS.
+    if (const auto handled = bundle::try_read_ux0_file(emuenv.io, translated_module_path, module_buffer)) {
+        res = *handled;
+    } else if (device == VitaIoDevice::app0) {
+        res = vfs::read_app_file(emuenv.io, module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
+    } else {
         res = vfs::read_file(device, module_buffer, emuenv.vita_fs_path, translated_module_path);
+    }
     if (!res) {
         LOG_ERROR("Failed to read module file {}", module_path);
         return SCE_ERROR_ERRNO_ENOENT;
