@@ -256,12 +256,14 @@ int main(int argc, char *argv[]) {
     // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
     // ux0/app. A synthetic apps-list entry lets the normal boot path (set_app_info -> load_app)
     // resolve to the mounted bundle; the mount serves app0:/addcont0: reads (see io/bundle.h).
-    if (cfg.bundle_path.has_value()) {
+    // NB: app::init above moved the local `cfg` into emuenv.cfg, so read the bundle path and set
+    // run_app_path on emuenv.cfg — that is the live config MainWindow boots from.
+    if (emuenv.cfg.bundle_path.has_value()) {
         bundle::Manifest manifest;
         std::string bundle_error;
-        auto backend = bundle::open_directory_backend(*cfg.bundle_path, manifest, bundle_error);
+        auto backend = bundle::open_directory_backend(*emuenv.cfg.bundle_path, manifest, bundle_error);
         if (!backend) {
-            LOG_CRITICAL("Failed to mount Game Bundle at {}: {}", cfg.bundle_path->string(), bundle_error);
+            LOG_CRITICAL("Failed to mount Game Bundle at {}: {}", emuenv.cfg.bundle_path->string(), bundle_error);
             return 1;
         }
         emuenv.io.mount = bundle::make_mount(backend, manifest);
@@ -283,8 +285,8 @@ int main(int argc, char *argv[]) {
             std::erase_if(apps, [&](const app::AppEntry &a) { return a.path == entry.path; });
             apps.push_back(entry);
         }
-        cfg.run_app_path = manifest.title_id;
-        LOG_INFO("Mounted Game Bundle [{}] from {}; booting directly", manifest.title_id, cfg.bundle_path->string());
+        emuenv.cfg.run_app_path = manifest.title_id;
+        LOG_INFO("Mounted Game Bundle [{}] from {}; booting directly", manifest.title_id, emuenv.cfg.bundle_path->string());
     }
 
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
