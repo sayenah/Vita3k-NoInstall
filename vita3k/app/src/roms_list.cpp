@@ -40,7 +40,11 @@ std::vector<std::string> scan_roms(EmuEnvState &emuenv) {
     }
 
     std::vector<AppEntry> roms;
-    for (const auto &entry : fs::directory_iterator(folder_path, ec)) {
+    // Walk the folder recursively so games nested in sub-folders (e.g. "Base Set/", "Translations/")
+    // are found too, not just archives sitting directly in the chosen folder. skip_permission_denied
+    // steps over unreadable sub-dirs instead of aborting; directory symlinks are not followed (boost
+    // default), so there are no symlink loops.
+    for (const auto &entry : fs::recursive_directory_iterator(folder_path, fs::directory_options::skip_permission_denied, ec)) {
         if (ec)
             break;
         boost::system::error_code fec;
@@ -50,16 +54,23 @@ std::vector<std::string> scan_roms(EmuEnvState &emuenv) {
         if (ext != ".zip" && ext != ".7z" && ext != ".pkg")
             continue;
 
+        // Label archives by their path relative to the chosen folder ("Translations/game.zip") so
+        // nested files and same-named files in different sub-folders stay distinguishable.
+        const std::string rel_label = fs_utils::path_to_utf8(entry.path().lexically_relative(folder_path));
+
         const ArchiveGameInfo info = read_archive_game_info(entry.path(), emuenv.cfg.sys_lang);
         if (!info.ok) {
-            failures.push_back(fs_utils::path_to_utf8(entry.path().filename()));
+            failures.push_back(rel_label);
             continue;
         }
 
-        // Cache the icon0 to a file the games-list renderer can load by path.
+        // Cache icon0 to a file the games-list renderer can load by path. Key the cache dir on the
+        // archive path, not just the title id, so two archives that share a title id -- a base game
+        // and its translation in sibling folders -- don't overwrite each other's icon.
         std::string icon_path;
         if (!info.icon0.empty()) {
-            const fs::path icon_dir = emuenv.cache_path / "roms" / info.title_id;
+            const std::string archive_key = std::to_string(std::hash<std::string>{}(fs_utils::path_to_utf8(entry.path())));
+            const fs::path icon_dir = emuenv.cache_path / "roms" / (info.title_id + "_" + archive_key);
             fs::create_directories(icon_dir, ec);
             const fs::path icon_file = icon_dir / "icon0.png";
             fs::ofstream icon_out(icon_file, std::ios::out | std::ios::binary);
