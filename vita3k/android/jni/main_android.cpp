@@ -26,6 +26,7 @@
 #include <ime/functions.h>
 #include <ime/keyboard.h>
 #include <io/bundle.h>
+#include <packages/pkg.h>
 #include <io/state.h>
 #include <motion/event_handler.h>
 #include <motion/functions.h>
@@ -238,16 +239,19 @@ extern "C" {
 SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
     std::string title_id;
     std::string bundle_dir;
+    std::string play_archive;
     for (int i = 0; i < argc; i++) {
         const std::string arg = argv[i];
         if (arg == "-r" && i + 1 < argc)
             title_id = argv[i + 1];
         else if (arg == "--bundle" && i + 1 < argc)
             bundle_dir = argv[i + 1];
+        else if (arg == "--play-archive" && i + 1 < argc)
+            play_archive = argv[i + 1];
     }
 
-    if (title_id.empty() && bundle_dir.empty()) {
-        LOG_ERROR("No title ID or bundle provided");
+    if (title_id.empty() && bundle_dir.empty() && play_archive.empty()) {
+        LOG_ERROR("No title ID, bundle, or archive provided");
         return -1;
     }
 
@@ -328,6 +332,19 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
         }
         title_id = manifest.title_id;
         LOG_INFO("Mounted Game Bundle [{}] from {}", manifest.title_id, bundle_dir);
+    }
+
+    // Play a game from an archive (.zip/.7z/.pkg) with no install: mount_pkg_for_play decrypts/unpacks
+    // to temp, mounts it, and returns the title id. Native gets a plain FS path (SAF readlink-resolved).
+    if (!play_archive.empty()) {
+        std::string archive_error;
+        const std::string archive_title = mount_pkg_for_play(*emuenv, play_archive, archive_error);
+        if (archive_title.empty()) {
+            LOG_ERROR("Failed to play archive {}: {}", play_archive, archive_error);
+            return -1;
+        }
+        title_id = archive_title;
+        LOG_INFO("Playing archive [{}] without install from {}", archive_title, play_archive);
     }
 
     AppLaunchRequest launch_request{

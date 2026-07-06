@@ -73,6 +73,8 @@ public class Emulator extends SDLActivity
     // Path to a Game Bundle directory to mount and boot directly (dev/testing + external launchers
     // such as ES-DE). Also accepted as a VIEW data URI (file:// path). See docs/game-bundle/.
     public static final String EXTRA_BUNDLE_PATH = "bundle_path";
+    // Path to an archive (.zip/.7z/.pkg) to play without installing (a ROM-library entry).
+    public static final String EXTRA_ARCHIVE_PATH = "archive_path";
     private static final String APP_RESTART_PARAMETERS = "AppStartParameters";
     static final int FILE_DIALOG_CODE = 545;
     static final int FOLDER_DIALOG_CODE = 546;
@@ -114,6 +116,15 @@ public class Emulator extends SDLActivity
             intent.putExtra(EXTRA_GAME_TITLE, gameTitle);
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        return intent;
+    }
+
+    // Launch a ROM-library entry: carries the archive path so native plays it with no install.
+    public static Intent createLaunchIntent(Context context, String titleId, String gameTitle, String archivePath) {
+        Intent intent = createLaunchIntent(context, titleId, gameTitle);
+        if (archivePath != null && !archivePath.isEmpty()) {
+            intent.putExtra(EXTRA_ARCHIVE_PATH, archivePath);
+        }
         return intent;
     }
 
@@ -188,6 +199,15 @@ public class Emulator extends SDLActivity
             if (bundleTitleId != null && !bundleTitleId.isEmpty())
                 return new String[]{"--bundle", bundlePath, "-r", bundleTitleId};
             return new String[]{"--bundle", bundlePath};
+        }
+
+        // Play a game from an archive (.zip/.7z/.pkg) with no install (a ROM-library entry).
+        String archivePath = intent.getStringExtra(EXTRA_ARCHIVE_PATH);
+        if (archivePath != null && !archivePath.isEmpty()) {
+            String archiveTitleId = intent.getStringExtra(EXTRA_TITLE_ID);
+            if (archiveTitleId != null && !archiveTitleId.isEmpty())
+                return new String[]{"--play-archive", archivePath, "-r", archiveTitleId};
+            return new String[]{"--play-archive", archivePath};
         }
 
         // Check for title_id from MainActivity launch
