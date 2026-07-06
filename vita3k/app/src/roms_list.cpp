@@ -24,6 +24,8 @@
 #include <util/log.h>
 #include <util/string_utils.h>
 
+#include <unordered_map>
+
 namespace app {
 
 std::vector<std::string> scan_roms(EmuEnvState &emuenv) {
@@ -96,6 +98,25 @@ std::vector<std::string> scan_roms(EmuEnvState &emuenv) {
         app.icon_path = icon_path;
         app.archive_path = app.path;
         roms.push_back(std::move(app));
+    }
+
+    // Disambiguate rows that would otherwise show the same title -- e.g. a base game and its
+    // translation, which share a title id. Only annotate the duplicates (uniques keep a clean name):
+    // append the sub-folder each came from, relative to the chosen folder, so "Gravity Rush" becomes
+    // "Gravity Rush (Base Set)" vs "Gravity Rush (Translations)".
+    {
+        std::unordered_map<std::string, int> title_counts;
+        for (const auto &rom : roms)
+            ++title_counts[rom.title];
+        for (auto &rom : roms) {
+            if (title_counts[rom.title] < 2)
+                continue;
+            const fs::path arch = fs_utils::utf8_to_path(rom.archive_path);
+            std::string where = fs_utils::path_to_utf8(arch.parent_path().lexically_relative(folder_path));
+            if (where.empty() || where == ".")
+                where = fs_utils::path_to_utf8(arch.stem()); // at the folder root: fall back to the file name
+            rom.title += " (" + where + ")";
+        }
     }
 
     {
