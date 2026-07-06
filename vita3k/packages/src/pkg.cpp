@@ -374,6 +374,55 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     return true;
 }
 
+// True if the zip contains an "app/" folder (a decrypted game tree, i.e. a Game Bundle zip) rather
+// than a raw .pkg.
+static bool zip_has_app_folder(const fs::path &zip_path) {
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_file(&zip, fs_utils::path_to_utf8(zip_path).c_str(), 0))
+        return false;
+    bool has_app = false;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files && !has_app; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat))
+            continue;
+        const std::string name = string_utils::tolower(stat.m_filename);
+        if (name.rfind("app/", 0) == 0) // entry starts with "app/"
+            has_app = true;
+    }
+    mz_zip_reader_end(&zip);
+    return has_app;
+}
+
+// Extract every member of a zip into dst_dir (preserving its tree). Returns false (error_out set) on
+// any failure.
+static bool extract_zip_to_dir(const fs::path &zip_path, const fs::path &dst_dir, std::string &error_out) {
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_file(&zip, fs_utils::path_to_utf8(zip_path).c_str(), 0)) {
+        error_out = "cannot open zip";
+        return false;
+    }
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat))
+            continue;
+        const fs::path out_path = dst_dir / fs_utils::utf8_to_path(stat.m_filename);
+        if (mz_zip_reader_is_file_a_directory(&zip, i)) {
+            fs::create_directories(out_path);
+            continue;
+        }
+        fs::create_directories(out_path.parent_path());
+        if (!mz_zip_reader_extract_to_file(&zip, i, fs_utils::path_to_utf8(out_path).c_str(), 0)) {
+            mz_zip_reader_end(&zip);
+            error_out = std::string("failed to extract ") + stat.m_filename;
+            return false;
+        }
+    }
+    mz_zip_reader_end(&zip);
+    return true;
+}
+
 // Extract the first .pkg member of a zip to `out_pkg`. Returns false (error_out set) if the zip can't
 // be opened or contains no .pkg.
 static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_pkg, std::string &error_out) {
@@ -415,39 +464,86 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     fs::remove_all(temp_root, ec); // clear any stale temp (e.g. after a crash)
     fs::create_directories(temp_root, ec);
 
-    // Accept a bare .pkg or a .zip containing one; for a zip, extract the .pkg to temp first.
-    fs::path pkg_path = input_path;
-    fs::path extracted_pkg;
-    if (string_utils::tolower(input_path.extension().string()) == ".zip") {
-        extracted_pkg = temp_root / "_src.pkg";
-        if (!extract_pkg_from_zip(input_path, extracted_pkg, error_out)) {
+    const std::string ext = string_utils::tolower(input_path.extension().string());
+    std::string title_id;
+    std::string content_id;
+    std::string category = "gd";
+
+    if (ext == ".zip" && zip_has_app_folder(input_path)) {
+        // A zip that already holds a decrypted game tree (a Game Bundle zip): just unpack it, no
+        // decryption needed. Identity comes from an included manifest, else from the app's param.sfo.
+        if (!extract_zip_to_dir(input_path, temp_root, error_out)) {
             fs::remove_all(temp_root, ec);
             return {};
         }
-        pkg_path = extracted_pkg;
+
+        std::vector<uint8_t> mbytes;
+        bundle::Manifest m;
+        std::string berr;
+        if (fs_utils::read_data(temp_root / "vita3k_bundle.json", mbytes) && bundle::parse_manifest(mbytes, m, berr) && !m.title_id.empty()) {
+            title_id = m.title_id;
+            content_id = m.content_id;
+            if (!m.category.empty())
+                category = m.category;
+        } else {
+            std::vector<uint8_t> sfo_buf;
+            if (!fs_utils::read_data(temp_root / "app/sce_sys/param.sfo", sfo_buf)) {
+                error_out = "zip has an app/ folder but no readable app/sce_sys/param.sfo";
+                fs::remove_all(temp_root, ec);
+                return {};
+            }
+            sfo::SfoAppInfo info;
+            sfo::get_param_info(info, sfo_buf, emuenv.cfg.sys_lang);
+            title_id = info.app_title_id;
+            content_id = info.app_content_id;
+            if (!info.app_category.empty())
+                category = info.app_category;
+        }
+
+        // Copy any license rifs the bundle carries onto the real ux0/license so boot finds them.
+        const fs::path lic_dir = temp_root / "license";
+        if (fs::is_directory(lic_dir, ec)) {
+            for (const auto &entry : fs::directory_iterator(lic_dir)) {
+                if (string_utils::tolower(entry.path().extension().string()) == ".rif")
+                    copy_license(emuenv, entry.path());
+            }
+        }
+    } else {
+        // A raw .pkg, or a .zip containing one: decrypt into temp_root/app (rif -> real ux0/license).
+        fs::path pkg_path = input_path;
+        fs::path extracted_pkg;
+        if (ext == ".zip") {
+            extracted_pkg = temp_root / "_src.pkg";
+            if (!extract_pkg_from_zip(input_path, extracted_pkg, error_out)) {
+                fs::remove_all(temp_root, ec);
+                return {};
+            }
+            pkg_path = extracted_pkg;
+        }
+
+        std::string zrif; // empty -> install_pkg derives it from the pkg's work.bin
+        if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
+            error_out = "failed to decrypt pkg (expected a self-contained NoNpDrm base-game pkg)";
+            fs::remove_all(temp_root, ec);
+            return {};
+        }
+        if (!extracted_pkg.empty())
+            fs::remove(extracted_pkg, ec); // source pkg no longer needed once decrypted
+
+        title_id = emuenv.app_info.app_title_id;
+        content_id = emuenv.app_info.app_content_id;
+        if (!emuenv.app_info.app_category.empty())
+            category = emuenv.app_info.app_category;
     }
 
-    // Decrypt the (self-contained NoNpDrm) base-game pkg into temp_root/app; the rif goes to the real
-    // ux0/license. Empty zRIF -> install_pkg derives it from the pkg's work.bin.
-    std::string zrif;
-    if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
-        error_out = "failed to decrypt pkg (expected a self-contained NoNpDrm base-game pkg)";
+    if (title_id.empty()) {
+        error_out = "could not determine the game's title id";
         fs::remove_all(temp_root, ec);
         return {};
     }
 
-    // The extracted source pkg is no longer needed once decrypted.
-    if (!extracted_pkg.empty())
-        fs::remove(extracted_pkg, ec);
-
-    const std::string title_id = emuenv.app_info.app_title_id;
-    const std::string content_id = emuenv.app_info.app_content_id;
-    std::string category = emuenv.app_info.app_category;
-    if (category.empty())
-        category = "gd";
-
-    // Emit the bundle manifest so the existing directory-backend mount can open temp_root.
-    {
+    // Ensure a manifest exists so the directory-backend mount can open temp_root.
+    if (!fs::exists(temp_root / "vita3k_bundle.json")) {
         fs::ofstream mf(temp_root / "vita3k_bundle.json", std::ios::out | std::ios::binary);
         mf << "{\"version\":1,\"title_id\":\"" << title_id << "\",\"content_id\":\"" << content_id
            << "\",\"category\":\"" << category << "\",\"has_patch\":false,\"dlc\":[]}";
@@ -457,7 +553,7 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     std::string berr;
     auto backend = bundle::open_directory_backend(temp_root, manifest, berr);
     if (!backend) {
-        error_out = "failed to mount decrypted pkg: " + berr;
+        error_out = "failed to mount game: " + berr;
         fs::remove_all(temp_root, ec);
         return {};
     }
@@ -466,7 +562,7 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     mount->owned_temp = temp_root;
     emuenv.io.mount = mount;
 
-    LOG_INFO("Decrypted pkg [{}] to temp for play-without-install ({})", title_id, fs_utils::path_to_utf8(pkg_path));
+    LOG_INFO("Prepared [{}] for play-without-install from {}", title_id, fs_utils::path_to_utf8(input_path));
     return title_id;
 }
 
