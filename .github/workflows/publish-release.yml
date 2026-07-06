@@ -1,0 +1,74 @@
+name: Publish Release
+
+# After a Build CI run succeeds on our branch, grab the Android + Windows artifacts and
+# (re)publish them as the "latest" GitHub Release, so they're downloadable from the
+# Releases page with no GitHub login. Pull-request builds are ignored.
+
+on:
+  workflow_run:
+    workflows: ["Build CI"]
+    types: [completed]
+
+permissions:
+  contents: write # create/replace the release
+  actions: read # read the triggering run's artifacts
+
+jobs:
+  release:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'feature/game-bundle' &&
+      github.event.workflow_run.event != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          pattern: vita3k-*-android
+          path: artifacts
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          pattern: vita3k-*-windows-x64
+          path: artifacts
+
+      - name: Package downloads
+        run: |
+          set -e
+          mkdir -p out
+          apk=$(find artifacts -type f -name '*.apk' | head -1)
+          if [ -n "$apk" ]; then
+            cp "$apk" "out/Vita3K-NoInstall.apk"
+            echo "Android APK packaged."
+          else
+            echo "::warning::no APK found in the build artifacts"
+          fi
+          wdir=$(find artifacts -type d -name 'vita3k-*-windows-x64' | head -1)
+          if [ -n "$wdir" ]; then
+            (cd "$wdir" && zip -qr "$GITHUB_WORKSPACE/out/Vita3K-NoInstall-windows-x64.zip" .)
+            echo "Windows zip packaged."
+          else
+            echo "::warning::no windows-x64 build found in the artifacts"
+          fi
+          ls -la out
+
+      - name: Publish/refresh the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          if [ -z "$(ls -A out 2>/dev/null)" ]; then
+            echo "::error::nothing to release"; exit 1
+          fi
+          gh release delete latest -R "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create latest -R "${{ github.repository }}" out/* \
+            --title "Latest Vita3K-NoInstall build" \
+            --notes "Automatically built from commit \`${SHA}\`.
+
+          - **Android:** download \`Vita3K-NoInstall.apk\` and install it (allow installing from your browser/files app).
+          - **Windows:** download \`Vita3K-NoInstall-windows-x64.zip\`, unzip, and run \`bin/Vita3K.exe\`."
