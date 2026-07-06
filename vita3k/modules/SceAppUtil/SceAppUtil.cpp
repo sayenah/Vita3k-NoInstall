@@ -19,6 +19,7 @@
 
 #include <emuenv/app_util.h>
 
+#include <io/bundle.h>
 #include <io/device.h>
 #include <io/functions.h>
 #include <io/io.h>
@@ -162,6 +163,12 @@ EXPORT(int, sceAppUtilBgdlGetStatus) {
 }
 
 static bool is_addcont_exist(EmuEnvState &emuenv, const SceChar8 *path) {
+    // DLC may live in a mounted Game Bundle rather than ux0/addcont on the host FS. try_exists_ux0
+    // reports a directory as existing only when non-empty, matching the host check below.
+    const fs::path addcont_ux0_rel = fs::path(emuenv.io.device_paths.addcont0) / reinterpret_cast<const char *>(path);
+    if (const auto handled = bundle::try_exists_ux0(emuenv.io, addcont_ux0_rel))
+        return *handled;
+
     const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / reinterpret_cast<const char *>(path) };
     return (fs::exists(drm_content_id_path) && (!fs::is_empty(drm_content_id_path)));
 }
