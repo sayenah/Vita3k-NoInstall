@@ -33,6 +33,9 @@ object NativeLib {
     /** Sets the DLCs folder and persists it (DLC is mounted for the matching game at launch, not listed). */
     external fun setDlcFolder(path: String)
 
+    /** Sets the Updates folder and persists it (an update overlays the base game at launch, not listed). */
+    external fun setUpdatesFolder(path: String)
+
     // --- App actions ---
     /**
      * Dispatches a single app action identified by its AppActionMask bit.

@@ -1485,6 +1485,15 @@ void MainWindow::setup_toolbar() {
             config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
             // No rescan needed: DLC isn't a games-list row; it's mounted for the matching game at launch.
         });
+        menu.addAction(tr("Set Updates Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of game updates (.pkg named with the title id, <TITLEID>/ folders or <TITLEID>.zip)"),
+                QString::fromStdString(emuenv.cfg.updates_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.updates_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            // No rescan needed: an update overlays the base game at launch, it isn't a games-list row.
+        });
 
         menu.exec(pos);
     });
