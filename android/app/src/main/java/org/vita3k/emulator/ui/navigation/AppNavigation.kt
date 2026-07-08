@@ -317,6 +317,18 @@ fun AppNavigation(
                         }
                     }
                 },
+                onSetUpdatesFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            NativeLib.setUpdatesFolder(path)
+                            Toast.makeText(
+                                activity,
+                                "Updates folder set. The latest update applies automatically when you launch a matching game.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                },
                 onInstallClick = { installViewModel.showSheet() },
                 onOpenSettings = {
                     navController.navigate(ROUTE_SETTINGS) {

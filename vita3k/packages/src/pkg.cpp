@@ -223,8 +223,9 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         type = PkgType::PKG_TYPE_VITA_PATCH;
     }
 
-    if (temp_mode && type != PkgType::PKG_TYPE_VITA_APP && type != PkgType::PKG_TYPE_VITA_DLC) {
-        LOG_ERROR("Play-without-install supports base-game and DLC pkgs (got content type {})", content_type);
+    if (temp_mode && type != PkgType::PKG_TYPE_VITA_APP && type != PkgType::PKG_TYPE_VITA_DLC
+        && type != PkgType::PKG_TYPE_VITA_PATCH) {
+        LOG_ERROR("Play-without-install supports base-game, DLC and update pkgs (got content type {})", content_type);
         return false;
     }
 
@@ -248,7 +249,8 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         emuenv.app_info.app_title += " (DLC)";
         break;
     case PkgType::PKG_TYPE_VITA_PATCH:
-        path /= fs::path("patch") / emuenv.app_info.app_title_id;
+        // temp mode decrypts the update into a staging dir; the caller merges it over temp_root/app.
+        path /= temp_mode ? fs::path("__update_stage") : fs::path("patch") / emuenv.app_info.app_title_id;
         emuenv.app_info.app_title += " (Update)";
         break;
     case PkgType::PKG_TYPE_VITA_THEME:
@@ -552,7 +554,7 @@ static bool extract_pkg_from_zip(const fs::path &zip_path, const fs::path &out_p
 // files whose embedded title id matches the game).
 
 // Title id embedded in a .pkg header's content id (chars 7..15), or "" if unreadable.
-static std::string dlc_pkg_title_id(const fs::path &pkg_path) {
+static std::string pkg_header_title_id(const fs::path &pkg_path) {
     FILE *f = FOPEN(pkg_path.c_str(), "rb");
     if (!f)
         return {};
@@ -652,7 +654,7 @@ static void decrypt_dlc_pkgs_under(EmuEnvState &emuenv, const fs::path &dir, con
         const fs::path p = it->path();
         if (!fs::is_regular_file(p, ec) || string_utils::tolower(p.extension().string()) != ".pkg")
             continue;
-        if (match_all || dlc_pkg_title_id(p) == title_id)
+        if (match_all || pkg_header_title_id(p) == title_id)
             decrypt_dlc_pkg(emuenv, p, temp_root);
     }
 }
@@ -713,9 +715,156 @@ static void mount_dlc_for_game(EmuEnvState &emuenv, const fs::path &temp_root, c
             continue;
         if (fs_utils::path_to_utf8(p).rfind(t_dir_prefix, 0) == 0)
             continue; // already handled inside the <TITLEID>/ folder
-        if (dlc_pkg_title_id(p) == title_id)
+        if (pkg_header_title_id(p) == title_id)
             decrypt_dlc_pkg(emuenv, p, temp_root);
     }
+}
+
+// ---- Game update (patch) support for play-without-install --------------------------------------
+//
+// A Vita update is a patch pkg that overlays the base game's app tree. Played without install by
+// decrypting it and merging its files over temp_root/app before boot. Source: a configurable Updates
+// folder holding a <TITLEID>/ folder, a <TITLEID>.zip/.7z, or loose .pkg matched by embedded title id
+// (updates carry the game id in both the file name and the header). If several updates match, the
+// highest app_version wins.
+
+// Recursively copy every file under src over dst, overwriting existing files (merge, not replace).
+static void merge_tree(const fs::path &src, const fs::path &dst) {
+    boost::system::error_code ec;
+    for (fs::recursive_directory_iterator it(src, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const fs::path rel = it->path().lexically_relative(src);
+        const fs::path target = dst / rel;
+        if (fs::is_directory(it->path(), ec)) {
+            fs::create_directories(target, ec);
+        } else {
+            fs::create_directories(target.parent_path(), ec);
+            fs::copy_file(it->path(), target, fs::copy_options::overwrite_existing, ec);
+            ec.clear();
+        }
+    }
+}
+
+// app_version (e.g. "01.02") from a pkg's param.sfo, or "" if unreadable.
+static std::string pkg_app_version(EmuEnvState &emuenv, const fs::path &pkg_path) {
+    std::vector<uint8_t> sfo;
+    if (!read_pkg_param_sfo(pkg_path, sfo))
+        return {};
+    sfo::SfoAppInfo info;
+    sfo::get_param_info(info, sfo, emuenv.cfg.sys_lang);
+    return info.app_version;
+}
+
+// Decrypt one update .pkg into temp_root/__update_stage and merge it over temp_root/app.
+static void apply_update_pkg(EmuEnvState &emuenv, const fs::path &pkg_path, const fs::path &temp_root) {
+    boost::system::error_code ec;
+    // Only apply actual updates (category "gp"). A stray base game ("gd") would otherwise make
+    // install_pkg wipe and re-decrypt temp_root/app; a DLC ("ac") would no-op.
+    std::vector<uint8_t> sfo;
+    if (read_pkg_param_sfo(pkg_path, sfo)) {
+        sfo::SfoAppInfo info;
+        sfo::get_param_info(info, sfo, emuenv.cfg.sys_lang);
+        if (info.app_category != "gp") {
+            LOG_INFO("Update: skipping {} -- not an update (category '{}')", fs_utils::path_to_utf8(pkg_path.filename()), info.app_category);
+            return;
+        }
+    }
+    const fs::path stage = temp_root / "__update_stage";
+    fs::remove_all(stage, ec);
+    std::string zrif;
+    if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
+        LOG_WARN("Update: could not decrypt {}", fs_utils::path_to_utf8(pkg_path.filename()));
+        fs::remove_all(stage, ec);
+        return;
+    }
+    merge_tree(stage, temp_root / "app");
+    fs::remove_all(stage, ec);
+    LOG_INFO("Update: applied {}", fs_utils::path_to_utf8(pkg_path.filename()));
+}
+
+// Collect update .pkg candidates under `dir` (recursive). match_all=false keeps only pkgs whose
+// embedded title id equals `title_id`.
+static void collect_update_pkgs(const fs::path &dir, const std::string &title_id, bool match_all, std::vector<fs::path> &out) {
+    boost::system::error_code ec;
+    for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const fs::path p = it->path();
+        if (!fs::is_regular_file(p, ec) || string_utils::tolower(p.extension().string()) != ".pkg")
+            continue;
+        if (match_all || pkg_header_title_id(p) == title_id)
+            out.push_back(p);
+    }
+}
+
+// Apply this game's latest update (if any) from the configured Updates folder onto temp_root/app.
+static void mount_updates_for_game(EmuEnvState &emuenv, const fs::path &temp_root, const std::string &title_id) {
+    const std::string &folder = emuenv.cfg.updates_folder;
+    if (folder.empty())
+        return;
+    boost::system::error_code ec;
+    const fs::path up_root = fs_utils::utf8_to_path(folder);
+    if (!fs::is_directory(up_root, ec))
+        return;
+
+    std::vector<fs::path> candidates;
+    const fs::path t_dir = up_root / title_id;
+    const fs::path scratch = temp_root / "__upd_extract";
+
+    // (a) A <TITLEID>/ folder of updates.
+    if (fs::is_directory(t_dir, ec))
+        collect_update_pkgs(t_dir, title_id, /*match_all=*/true, candidates);
+
+    // (b) A <TITLEID>.zip / .7z of updates (extracted to scratch; the chosen pkg is applied before
+    // scratch is cleared at the end).
+    for (const char *ext : { ".zip", ".7z" }) {
+        const fs::path t_arch = up_root / (title_id + ext);
+        if (!fs::is_regular_file(t_arch, ec))
+            continue;
+        fs::create_directories(scratch, ec);
+        std::string e;
+        const bool ok = (std::string(ext) == ".7z") ? extract_7z_to_dir(t_arch, scratch, e) : extract_zip_to_dir(t_arch, scratch, e);
+        if (ok)
+            collect_update_pkgs(scratch, title_id, /*match_all=*/true, candidates);
+        else
+            LOG_WARN("Update: could not extract {} ({})", fs_utils::path_to_utf8(t_arch.filename()), e);
+    }
+
+    // (c) Loose .pkg files anywhere in the Updates folder, matched to this game by embedded title id.
+    const std::string t_dir_prefix = fs_utils::path_to_utf8(t_dir);
+    for (fs::recursive_directory_iterator it(up_root, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const fs::path p = it->path();
+        if (!fs::is_regular_file(p, ec) || string_utils::tolower(p.extension().string()) != ".pkg")
+            continue;
+        if (fs_utils::path_to_utf8(p).rfind(t_dir_prefix, 0) == 0)
+            continue; // already collected from the <TITLEID>/ folder
+        if (pkg_header_title_id(p) == title_id)
+            candidates.push_back(p);
+    }
+
+    // Apply only the highest-version update (Vita patches are cumulative full replacements).
+    if (!candidates.empty()) {
+        fs::path best;
+        std::string best_ver;
+        for (const auto &c : candidates) {
+            const std::string v = pkg_app_version(emuenv, c);
+            if (best.empty() || v > best_ver) {
+                best = c;
+                best_ver = v;
+            }
+        }
+        apply_update_pkg(emuenv, best, temp_root);
+    }
+    fs::remove_all(scratch, ec);
 }
 
 std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
@@ -829,11 +978,13 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
         return {};
     }
 
-    // Bring in this game's DLC as addcont0: content (no install), from an addcont/ folder inside the
-    // game archive and from the configured DLCs folder. install_pkg clobbers emuenv.app_info, so
-    // snapshot/restore the game's around it -- boot needs the game's app_info, not a DLC's.
+    // Overlay this game's latest update onto app/, then bring in its DLC as addcont0: content -- both
+    // without install, from the configured Updates/DLCs folders (and an addcont/ folder inside the
+    // game archive). install_pkg clobbers emuenv.app_info, so snapshot/restore the game's around it:
+    // boot needs the game's app_info, not an update's or DLC's.
     {
         const auto saved_app_info = emuenv.app_info;
+        mount_updates_for_game(emuenv, temp_root, title_id);
         mount_dlc_for_game(emuenv, temp_root, title_id);
         emuenv.app_info = saved_app_info;
     }
