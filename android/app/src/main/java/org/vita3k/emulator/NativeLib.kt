@@ -36,6 +36,9 @@ object NativeLib {
     /** Sets the Updates folder and persists it (an update overlays the base game at launch, not listed). */
     external fun setUpdatesFolder(path: String)
 
+    /** Sets the License folder and persists it (the matching game's rifs are copied to ux0/license at launch). */
+    external fun setLicenseFolder(path: String)
+
     // --- App actions ---
     /**
      * Dispatches a single app action identified by its AppActionMask bit.
