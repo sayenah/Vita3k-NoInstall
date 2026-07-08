@@ -703,6 +703,16 @@ Java_org_vita3k_emulator_NativeLib_setDlcFolder(JNIEnv *env, jclass, jstring pat
     config::save_current_config(emuenv->cfg, emuenv->config_path, {});
 }
 
+// Sets the Updates folder and persists it. No rescan: an update overlays the base game at launch.
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setUpdatesFolder(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return;
+    emuenv->cfg.updates_folder = path_str ? jstring_to_string(env, path_str) : std::string();
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+}
+
 JNIEXPORT jintArray JNICALL
 Java_org_vita3k_emulator_NativeLib_saveSettings(JNIEnv *env, jclass, jstring title_id_str, jobject config_obj) {
     auto *emuenv = get_emuenv();
