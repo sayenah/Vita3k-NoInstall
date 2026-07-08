@@ -867,6 +867,79 @@ static void mount_updates_for_game(EmuEnvState &emuenv, const fs::path &temp_roo
     fs::remove_all(scratch, ec);
 }
 
+// ---- License folder support for play-without-install -------------------------------------------
+//
+// A game plus all its updates and DLC share one title id, so every rif they need lives under
+// ux0/license/<title_id>/. This copies the launched game's title-id folder of rifs from a configured
+// License folder (or a license.zip inside it) onto the real ux0/license so get_license (boot) and
+// find_pkg_zrif (update/DLC decrypt) resolve every key -- no manual copy into ux0. The folder holds
+// the same <title_id>/<content_id>.rif tree that tools/build-license-folder.py produces.
+
+// Extract every "*.rif" under a <title_id>/ path in a zip into dst_dir (flattened to file names).
+static void extract_license_rifs_from_zip(const fs::path &zip_path, const std::string &title_id, const fs::path &dst_dir) {
+    FILE *fp = FOPEN(zip_path.c_str(), "rb");
+    if (!fp)
+        return;
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        return;
+    }
+    boost::system::error_code ec;
+    fs::create_directories(dst_dir, ec);
+    const std::string prefix = title_id + "/";
+    const std::string needle = "/" + title_id + "/";
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat) || mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+        const std::string name = stat.m_filename;
+        const std::string lname = string_utils::tolower(name);
+        if (lname.size() < 4 || lname.compare(lname.size() - 4, 4, ".rif") != 0)
+            continue;
+        if (name.rfind(prefix, 0) != 0 && name.find(needle) == std::string::npos)
+            continue; // only rifs under this game's <title_id>/ path
+        const fs::path out = dst_dir / fs_utils::utf8_to_path(name).filename();
+        mz_zip_reader_extract_to_file(&zip, i, fs_utils::path_to_utf8(out).c_str(), 0);
+    }
+    mz_zip_reader_end(&zip);
+    fclose(fp);
+}
+
+// Place this game's licenses (game + its updates + DLC) onto the real ux0/license/<title_id>.
+static void mount_licenses_for_game(EmuEnvState &emuenv, const std::string &title_id) {
+    const std::string &folder = emuenv.cfg.license_folder;
+    if (folder.empty() || title_id.empty())
+        return;
+    boost::system::error_code ec;
+    const fs::path lic_root = fs_utils::utf8_to_path(folder);
+    if (!fs::is_directory(lic_root, ec))
+        return;
+    const fs::path dst = emuenv.vita_fs_path / "ux0/license" / title_id;
+
+    // (a) A <title_id>/ folder of .rif files (the tree tools/build-license-folder.py produces).
+    const fs::path src_dir = lic_root / title_id;
+    if (fs::is_directory(src_dir, ec)) {
+        fs::create_directories(dst, ec);
+        for (fs::directory_iterator it(src_dir, ec), end; it != end; it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (fs::is_regular_file(it->path(), ec) && string_utils::tolower(it->path().extension().string()) == ".rif") {
+                fs::copy_file(it->path(), dst / it->path().filename(), fs::copy_options::overwrite_existing, ec);
+                ec.clear();
+            }
+        }
+    }
+
+    // (b) A license.zip holding the same <title_id>/<content_id>.rif tree.
+    const fs::path lic_zip = lic_root / "license.zip";
+    if (fs::is_regular_file(lic_zip, ec))
+        extract_license_rifs_from_zip(lic_zip, title_id, dst);
+}
+
 std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
     boost::system::error_code ec;
     const fs::path temp_root = emuenv.cache_path / "pkgplay";
@@ -957,7 +1030,11 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
             pkg_path = extracted_pkg;
         }
 
-        std::string zrif; // empty -> install_pkg derives it from the pkg's work.bin
+        // Original (non-NoNpDrm) base-game pkgs need their license to decrypt; place it from the
+        // License folder first (read the title id straight from the pkg header).
+        mount_licenses_for_game(emuenv, pkg_header_title_id(pkg_path));
+
+        std::string zrif; // empty -> install_pkg derives it from work.bin or the placed ux0/license rif
         if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
             error_out = "failed to decrypt pkg (expected a self-contained NoNpDrm base-game pkg)";
             fs::remove_all(temp_root, ec);
@@ -984,6 +1061,7 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
     // boot needs the game's app_info, not an update's or DLC's.
     {
         const auto saved_app_info = emuenv.app_info;
+        mount_licenses_for_game(emuenv, title_id); // place game+update+DLC rifs before decrypting them
         mount_updates_for_game(emuenv, temp_root, title_id);
         mount_dlc_for_game(emuenv, temp_root, title_id);
         emuenv.app_info = saved_app_info;

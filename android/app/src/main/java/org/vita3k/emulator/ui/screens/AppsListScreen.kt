@@ -110,6 +110,7 @@ fun AppsListScreen(
     onSetRomsFolder: () -> Unit = {},
     onSetDlcFolder: () -> Unit = {},
     onSetUpdatesFolder: () -> Unit = {},
+    onSetLicenseFolder: () -> Unit = {},
     onInstallClick: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenTrophyManager: () -> Unit = {},
@@ -204,6 +205,10 @@ fun AppsListScreen(
                                 onSetUpdatesFolder = {
                                     showOverflowMenu = false
                                     onSetUpdatesFolder()
+                                },
+                                onSetLicenseFolder = {
+                                    showOverflowMenu = false
+                                    onSetLicenseFolder()
                                 },
                                 onTrophyManager = {
                                     showOverflowMenu = false
@@ -675,6 +680,7 @@ private fun AppsListOverflowMenu(
     onSetRomsFolder: () -> Unit,
     onSetDlcFolder: () -> Unit,
     onSetUpdatesFolder: () -> Unit,
+    onSetLicenseFolder: () -> Unit,
     onTrophyManager: () -> Unit,
     onUserManagement: () -> Unit,
     onWelcomeScreen: () -> Unit,
@@ -731,6 +737,16 @@ private fun AppsListOverflowMenu(
                     )
                 },
                 onClick = onSetUpdatesFolder
+            )
+            DropdownMenuItem(
+                text = { Text("Set License Folder…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onSetLicenseFolder
             )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.apps_list_menu_trophies)) },

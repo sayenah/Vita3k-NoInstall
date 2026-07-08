@@ -329,6 +329,18 @@ fun AppNavigation(
                         }
                     }
                 },
+                onSetLicenseFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            NativeLib.setLicenseFolder(path)
+                            Toast.makeText(
+                                activity,
+                                "License folder set. A game's licenses are applied automatically when you launch it.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                },
                 onInstallClick = { installViewModel.showSheet() },
                 onOpenSettings = {
                     navController.navigate(ROUTE_SETTINGS) {

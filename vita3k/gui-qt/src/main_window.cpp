@@ -1494,6 +1494,15 @@ void MainWindow::setup_toolbar() {
             config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
             // No rescan needed: an update overlays the base game at launch, it isn't a games-list row.
         });
+        menu.addAction(tr("Set License Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the license folder (a <TITLEID>/<CONTENTID>.rif tree, or a license.zip of it)"),
+                QString::fromStdString(emuenv.cfg.license_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.license_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            // No rescan needed: the matching game's licenses are copied to ux0/license at launch.
+        });
 
         menu.exec(pos);
     });
