@@ -84,3 +84,9 @@ fastlane/readme.md
 
 # Copilot local config
 .github/copilot-instructions.md
+
+# WSL "mark of the web" sidecar metadata
+*:Zone.Identifier
+
+# Local NoPayStation catalogs fed to tools/build-license-folder.py (large, user-supplied inputs)
+/tools/PSV_*.tsv
