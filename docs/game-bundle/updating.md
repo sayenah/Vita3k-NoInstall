@@ -1,9 +1,10 @@
 # Updating Vita3K-NoInstall to a newer upstream Vita3K
 
-This fork is a small patch series (2 feature commits + tooling) on top of
-upstream `Vita3K/Vita3K`. To move it onto a newer upstream, you **rebase**:
-replay our commits on top of the newer code, resolve any collisions, push,
-and let CI build fresh installers/APKs.
+This fork is a compact patch series (~13 commits: the no-install mount +
+archive decrypt, the ROMs/DLC/Updates/License folders, the library UI, CI, and
+tooling) on top of upstream `Vita3K/Vita3K`. To move it onto a newer upstream,
+you **rebase**: replay our commits on top of the newer code, resolve any
+collisions, push, and let CI build fresh installers/APKs.
 
 Almost all of our code lives in **new files** that upstream never touches
 (`io/bundle.*`, `packages/archive_*`, `app/roms_list.cpp`, `external/lzma-sdk/`,
@@ -45,10 +46,11 @@ fetch others, e.g. `tools/fetch-latest-build.sh android windows-x64 macos-arm64`
 Only the upstream-owned files we edited. If any of these changed upstream, the
 rebase will pause on it:
 
-- `vita3k/io/src/io.cpp`, `vita3k/io/include/io/{io,state,vfs}.h`
+- `vita3k/io/src/{io,state_functions}.cpp`, `vita3k/io/include/io/{io,state,vfs}.h`, `vita3k/io/CMakeLists.txt`
 - `vita3k/modules/module_parent.cpp`, `SceAppMgr`, `SceAppUtil`, `SceAvPlayer`
-- `vita3k/packages/src/pkg.cpp`, `vita3k/packages/CMakeLists.txt`
-- `vita3k/app/src/{app,apps_list}.cpp`, `vita3k/gui-qt/src/{apps_list,main_window}.cpp`
+- `vita3k/packages/src/pkg.cpp`, `vita3k/packages/include/packages/pkg.h`, `vita3k/packages/CMakeLists.txt`
+- `vita3k/app/src/{app,apps_list}.cpp`, `vita3k/app/include/app/{functions,state}.h`, `vita3k/app/CMakeLists.txt`
+- `vita3k/gui-qt/src/{apps_list,main_window}.cpp`
 - `vita3k/config/*`, `vita3k/main.cpp`, `vita3k/interface.cpp`
 - `vita3k/android/jni/*`, `android/app/src/main/java/org/vita3k/emulator/**`
 
