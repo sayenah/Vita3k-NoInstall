@@ -379,34 +379,38 @@ jobs:
       group: publish-noinstall-release
       cancel-in-progress: false
     steps:
+      # Each artifact goes to its OWN directory (merge-multiple flattens the artifact's contents into
+      # that path). download-artifact@v8 extracts straight into `path` with no per-artifact subdir, so
+      # we must not rely on a subdirectory name -- we package from these fixed paths instead.
       - name: Download Android artifact
         continue-on-error: true # a failed platform simply won't have an artifact
         uses: actions/download-artifact@v8
         with:
           pattern: vita3k-*-android
-          path: artifacts
+          path: dl/android
+          merge-multiple: true
 
       - name: Download Windows artifact
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           pattern: vita3k-*-windows-x64
-          path: artifacts
+          path: dl/windows
+          merge-multiple: true
 
       - name: Package downloads
         run: |
           set -e
           mkdir -p out
-          apk=$(find artifacts -type f -name '*.apk' | head -1)
+          apk=$(find dl/android -type f -name '*.apk' 2>/dev/null | head -1)
           if [ -n "$apk" ]; then
             cp "$apk" "out/Vita3K-NoInstall.apk"
             echo "Android APK packaged."
           else
             echo "::warning::no APK found in the build artifacts"
           fi
-          wdir=$(find artifacts -type d -name 'vita3k-*-windows-x64' | head -1)
-          if [ -n "$wdir" ]; then
-            (cd "$wdir" && zip -qr "$GITHUB_WORKSPACE/out/Vita3K-NoInstall-windows-x64.zip" .)
+          if [ -d dl/windows ] && [ -n "$(ls -A dl/windows 2>/dev/null)" ]; then
+            (cd dl/windows && zip -qr "$GITHUB_WORKSPACE/out/Vita3K-NoInstall-windows-x64.zip" .)
             echo "Windows zip packaged."
           else
             echo "::warning::no windows-x64 build found in the artifacts"
