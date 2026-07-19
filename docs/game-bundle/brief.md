@@ -1,234 +1,185 @@
-# Vita3K Fork: Boot Games Directly From Nicely-Named Archives ("Game Bundles")
+# Vita3K Fork: Play PS Vita Games With No Install
 
-Implementation brief. Written against upstream `master`; verified against commit `24a401f`
-(2026-07-05). This in-repo copy is the **source of truth** — the standalone brief that seeded it
-has been superseded. Corrections applied during P0 kickoff are marked **[CORRECTED]**; verified
-findings are consolidated in §9.
+Design + implementation reference. Written against upstream `master`; the code map in §5 was verified
+against commit `24a401f` (2026-07-05). This in-repo copy is the **source of truth**.
 
-## 1. Problem & Decision
+> **History note.** The original brief proposed a single persistent *STORE-mode zip per game* ("Game
+> Bundle") produced by a one-time **import**, with direct-from-pkg playback deferred as the top
+> risk. What actually shipped is different and simpler: there is no import step and no persistent
+> per-game archive. You keep your `.pkg`/`.zip`/`.7z` files in folders; each launch **decrypts/unpacks
+> the game to a temporary directory, mounts that read-only, boots, and deletes it on exit.** The
+> feared random-access PFS decryptor was avoided by doing a full one-shot decrypt-to-temp (reusing the
+> shipping `install_pkg`). The pieces the brief got right — the read-only mount interface, the IO
+> op-surface routing, and the code map (§5) — are exactly what the shipped design is built on. Sections
+> below describe what is **actually implemented**.
+
+## 1. Problem & Approach
 
 **Problem.** Stock Vita3K requires installing `.pkg` files into `<data>/ux0/app/<TITLEID>/`. That means:
 duplicate storage (source pkg + installed copy), ugly nine-character folder names instead of game
 names, a manual install ritual per game, and no easy way to offload a game (ES-DE on Android can't
 orchestrate install/uninstall around a launch).
 
-**Decision: implement a read-only "Game Bundle" mount — a STORE-mode zip of the already-decrypted
-game — as v1. Defer direct-from-pkg playback to a later phase behind the same interface.**
+**Approach.** Boot a game directly from a nicely-named archive or folder, with **no permanent install**:
 
-Rationale:
+1. A read-only **mount** virtualizes the `app0:` and `addcont0:` devices. Reads/stats/dir-listings under
+   those roots are served from the mounted game tree; every mutating op returns `EROFS`. Everything else
+   — firmware (`vs0:`, `os0:`), saves (`ux0/user`), licenses (`ux0/license`) — stays on the real host
+   filesystem, untouched.
+2. To boot an encrypted `.pkg` (or an archive of one), the game is **decrypted/unpacked to a private
+   temp directory**, that directory is mounted, and it is **deleted when the game stops** (`io_deinit`).
+   Nothing persists on disk between plays except your original source files.
+3. Optional **DLC, game updates, and licenses** are pulled in at launch from three configurable side
+   folders, matched to the game by title id (§3).
 
-- Vita pkgs have **two** encryption layers: AES-128-CTR on the container (random-access friendly,
-  code already in `vita3k/packages/src/pkg.cpp`, pkg2zip-derived) and **PFS inside**, decrypted by a
-  vendored batch copy of psvpfstools. Direct pkg playback requires rearchitecting psvpfstools into a
-  random-access per-sector decryptor — the single highest-risk component (failure mode: silent data
-  corruption mid-game).
-- **DLC is required day one.** Under pkg-direct that means multiple simultaneous PFS mounts (base +
-  each DLC pkg) plus runtime patch/base union. Under the bundle approach all of that collapses into
-  import-time file copies performed by the installer code that already ships and works.
-- Runtime UX is identical either way: one pretty-named file per game, no install, instant boot,
-  single copy on disk, trivially offloadable. The only cost is a one-time automated import per game.
-- The mount interface built in Phase 0 is exactly what a future pkg backend would plug into.
+Runtime UX: one pretty-named file (or folder) per game, no install, single copy on disk, trivially
+movable/offloadable. The cost is a short decrypt/unpack at each boot instead of a one-time install.
 
-**Honest disk-space note:** a STORE zip is roughly the same size as the installed folder (and as the
-pkg). The space win is eliminating the *duplicate* copy and making the single copy a movable file —
-not compression. Seekable compression is parked (see §8).
+## 2. Two Mount Entry Points
 
-## 2. Goals / Non-Goals
+Both build a read-only mount (`io.mount`, a `shared_ptr<BundleMount>`) and boot through the normal path.
 
-**Goals (v1)**
+- **`--play-pkg <path>` (desktop) / library tap / Android play-archive — the real play path.**
+  `mount_pkg_for_play` (`packages/src/pkg.cpp:936`) accepts:
+  - a raw self-contained **NoNpDrm `.pkg`** (the zRIF is derived from `sce_sys/package/work.bin`, or
+    from a `.rif` placed via the License folder);
+  - a **`.zip`/`.7z` containing a `.pkg`** (the pkg is extracted, then decrypted);
+  - a **`.zip`/`.7z` containing an already-decrypted `app/` tree** (unpacked directly; may also carry
+    `vita3k_bundle.json`, an `addcont/` tree, and `work.bin`/`*.rif`).
 
-1. Vita3K boots `Persona 4 Golden.zip` directly — no install step, no `ux0/app` copy.
-2. One-time "Import" converts pkg(s) (+ zRIFs) → one bundle zip: base game, update merged in, DLC
-   included. Optionally deletes the source pkgs after verification.
-3. Saves, trophies, and licenses persist on the real filesystem; deleting/moving a bundle never
-   touches them.
-4. Android: bundles launchable from the in-app library **and** via an exported intent so ES-DE
-   Android can launch by file path.
-5. Desktop (Linux/Windows) builds boot bundles too — that's the dev/test vehicle.
+  It decrypts/unpacks into `<cache>/pkgplay`, overlays the game's latest update, brings in its DLC as
+  `addcont0:` content, copies its licenses to `ux0/license`, writes a synthetic `vita3k_bundle.json`,
+  mounts the temp tree (directory backend), and returns the title id to boot. The temp tree is owned by
+  the mount (`BundleMount::owned_temp`) and removed in `io_deinit` when the game stops.
 
-**Non-Goals (v1)** — explicitly out of scope:
+- **`--bundle <dir>` (dev/testing) — mount a prepared directory.**
+  Mounts an already-decrypted **Game Bundle directory** (a folder with `vita3k_bundle.json` + `app/`,
+  optionally `addcont/`) via `open_directory_backend` and boots it (`main.cpp:257`). No decryption, no
+  temp, nothing deleted — it points at your folder in place. Android exposes the same via the
+  `bundle_path` intent extra (or a `VIEW` `file://` data URI) on the exported `.Emulator` activity.
 
-- Direct-from-pkg playback (Phase Next, §8). No psvpfstools changes of any kind.
-- Compressed bundles (STORE only; format has a version field for later).
-- Themes, PSM, or anything outside game/patch/DLC categories.
-- Modifying or removing the existing install/uninstall flows — they stay untouched and working.
-- Upstreaming. Assume a long-lived fork; optimize diffs for rebasing (§7).
+A synthetic `app::AppEntry` is pushed into the in-memory apps list so `set_app_info` → `load_app`
+resolves to the mount; the real game title is loaded from the bundle's `param.sfo` at boot.
 
-## 3. Bundle Format v1
+## 3. The Library + Side Folders
+
+Four folders are configurable in Settings (desktop Qt: right-click menu "Set … Folder…";
+Android: the apps-list overflow menu). All four are optional and matched to a game by **title id**.
+
+- **ROMs folder** (`cfg.roms_folder`). Scanned **recursively** for `.zip`/`.7z`/`.pkg`
+  (`app/src/roms_list.cpp:scan_roms`); each becomes a games-list row with its real title and extracted
+  `icon0.png`. Nested sub-folders are supported; two archives that share a title id (e.g. a base game and
+  a translation in sibling sub-folders) are disambiguated by appending their sub-folder name. Tapping a
+  row launches it through `mount_pkg_for_play`. Metadata is read cheaply without decrypting: from an
+  archive's `sce_sys/param.sfo` member, or a raw pkg's unencrypted info-section `param.sfo`
+  (`read_pkg_param_sfo`); a raw pkg's icon lives inside the encrypted PFS, so those show the default icon.
+
+- **DLCs folder** (`cfg.dlc_folder`). At launch, the game's DLC is decrypted into `<temp>/addcont`.
+  Accepted layouts, matched to the launched title id:
+  - a `<TITLEID>/` sub-folder holding DLC `.pkg`s and/or already-decrypted addcont trees;
+  - a `<TITLEID>.zip` / `<TITLEID>.7z` of the same;
+  - loose `.pkg` files anywhere in the folder, matched by the pkg header's embedded title id.
+  DLC shipped inside the game archive (an `addcont/` folder next to `app/`) is also picked up.
+
+- **Updates folder** (`cfg.updates_folder`). At launch, the game's update patch is decrypted and
+  **merged over `<temp>/app`** (overwrite-existing). Same three layouts as DLC. Only pkgs with category
+  `gp` (a real update) are applied; if several match, the **highest `app_version` wins** (Vita patches
+  are cumulative).
+
+- **License folder** (`cfg.license_folder`). At launch, the game's `.rif` licenses (base + updates + DLC
+  all share one title id) are copied to `ux0/license/<TITLEID>/` so boot's `get_license` and the
+  update/DLC decrypt can find every key — no manual copy into `ux0`. Accepted:
+  - a `<TITLEID>/` folder of `.rif` files (exactly the tree `tools/build-license-folder.py` produces);
+  - a `license.zip` holding the same `<TITLEID>/<CONTENTID>.rif` tree.
+
+  Additionally, when a decrypted-dump archive is played, any `work.bin`/`*.rif` inside it is copied to
+  `ux0/license` automatically (case-insensitive, recursive — this is what made Android dumps work).
+
+## 4. Bundle Format & Manifest
+
+The mount is fed a directory tree with this shape (produced in `<temp>` by `mount_pkg_for_play`, or
+prepared by hand for `--bundle`):
 
 ```
-Game Name.zip                    # zip64 allowed (>4 GiB games exist); STORE (method 0) only
-├── vita3k_bundle.json           # {"version":1,"title_id":"PCSE00123","content_id":"...",
-│                                #  "category":"gd","has_patch":true,"dlc":["<CONTENTID>", ...]}
-├── app/                         # decrypted game tree == contents of ux0/app/<TITLEID>/
-│                                # with the update ALREADY merged over the base at import time
-├── addcont/<CONTENTID>/...      # one decrypted tree per DLC == ux0/addcont/<TITLEID>/<CONTENTID>/
-└── license/<CONTENTID>.rif      # rifs for base (+patch if separate) + every DLC
+<bundle root>/
+├── vita3k_bundle.json   # {"version":1,"title_id":"PCSE00123","content_id":"...",
+│                        #  "category":"gd","has_patch":false,"dlc":[]}
+├── app/                 # decrypted game tree == contents of ux0/app/<TITLEID>/, update merged in
+├── addcont/<CONTENTID>/ # one decrypted tree per DLC == ux0/addcont/<TITLEID>/<CONTENTID>/
+└── (licenses are NOT kept here — they are copied to the real ux0/license at launch)
 ```
 
-Rules: forward-slash paths, exact case preserved, no compression (import must enforce method 0),
-manifest is required and version-checked at mount. Import copies every rif into the real
-`ux0/license/<TITLEID>/` (they're ~512 bytes each and persist like saves); the copies inside the zip
-exist so a bundle is self-contained if the data folder is ever wiped.
+`vita3k_bundle.json` is **required** by the directory backend and version-checked (`version` must be 1);
+`title_id` is the only field the backend truly needs. `map_ux0_path` translates a post-`translate_path`
+`app/<TITLEID>/…` path to the bundle key `app/…`, and `addcont/<TITLEID>/…` to `addcont/…`. The manifest
+parser (`bundle::parse_manifest`) is a minimal, tolerant reader for this exact flat schema — not a
+general JSON parser (we control the emitter). Paths inside the tree resolve case-insensitively
+(`resolve_icase`) so wrong-case requests work on case-sensitive hosts, and never escape the root.
 
-**Why licenses live on the real FS.** Boot reads `ux0/license/<TITLEID>/<CONTENTID>.rif` via
-`get_license` (`app/src/app.cpp:257`, `packages/src/license.cpp:99-104`); if the rif is absent boot
-logs a warning and continues — there is **no app-dir raw-`fs::` license fallback in the boot path.**
-**[CORRECTED]** The earlier brief claimed a "first-boot fallback that copies `sce_sys/package/work.bin`
-out of the app dir" at `interface.cpp:95-98`. That is wrong: `interface.cpp:94-98` lives inside
-`is_nonpdrm()`, which is part of the NoNpDrm **install/decrypt** flow and runs only during package
-installation — never at boot. The design conclusion is unchanged: because the importer pre-places
-every rif into `ux0/license/<TITLEID>/`, boot's `get_license` finds them on the real FS and the mount
-never has to serve a license — zero mount complexity for licensing.
+## 5. Verified Code Map (where everything hooks)
 
-## 4. Verified Code Map (where everything hooks)
+**The IO funnel is narrow.** Host paths are built by `io.cpp` + `device.cpp` (`construct_emulated_path`),
+with module loads via `module_parent`'s `translate_path` and FMV via `SceAvPlayer`.
 
-**The IO funnel is narrow.** Outside the GUI, host paths are built by
-`vita3k/io/src/io.cpp` + `vita3k/io/src/device.cpp` (`construct_emulated_path`), with module loads
-routed via `module_parent`'s `translate_path` and FMV via `SceAvPlayer`.
+- **Op surface routed** (`io/src/io.cpp`): `open_file`, `stat_file`, `stat_file_by_fd`, `open_dir`,
+  `read_dir` serve from the mount when the path maps to a bundle key; `write_file`/`truncate_file`,
+  `remove_file`, `rename`, `create_dir`, `remove_dir` return `SCE_ERROR_ERRNO_EROFS` (`io/io.h`) for
+  paths under `app0:`/`addcont0:`. Bundle-backed fds live in the existing `std_files`/`dir_entries`
+  maps via a second `FileStats`/`DirStats` constructor that holds an `EntryReader`/`DirReader` instead
+  of a host file (`io/state.h`); `state_functions.cpp` routes read/seek/tell/truncate to the reader +
+  an fd cursor. `io_deinit` deletes `owned_temp` and clears `io.mount`.
+- **Per-boot device mapping**: `init_device_paths` sets `device_paths.app0 = "app/" + io.app_path` and
+  `addcont0 = "addcont/" + io.addcont`; for games `io.app_path == io.addcont == title_id`.
 
-- **Full op surface** to route: `io/include/io/functions.h` — `open_file`, `read_file`,
-  `write_file`, `truncate_file`, `seek_file`, `tell_file`, `stat_file`, `stat_file_by_fd`,
-  `close_file`, `remove_file`, `rename`, `open_dir`, `read_dir`, `create_dir`, `close_dir`,
-  `remove_dir`. For paths under a mounted root: reads/stats/dir-listing served from the bundle;
-  all mutating ops return `SCE_ERROR_ERRNO_EROFS`.
-- **Per-boot device mapping**: `init_device_paths` (`io/src/io.cpp:159`) sets
-  `device_paths.app0 = "app/" + io.app_path` and `device_paths.addcont0 = "addcont/" + io.addcont`;
-  called from `interface.cpp:461` (`load_app_impl`). `app0:` and `addcont0:` are the two roots the
-  mount virtualizes. For games `io.app_path == io.addcont == title_id`
-  (`apps_list.cpp:349`/`330`, set in `set_app_info` `apps_list.cpp:580-584`).
-  `translate_path` (`io.cpp:222`) collapses `app0:`/`addcont0:` into the `ux0` device; `open_file`
-  keeps the original device in `device_for_icase` (`io.cpp:314`) — the clean routing seam.
-  Note `find_case_isens_path` slices `substr(0,18)` for addcont (`io.cpp:187`) — replicate its
-  semantics, don't "fix" it.
+**Raw-`fs::` stragglers routed through the bundle** (host-path touches that bypass emulated IO):
 
-**Verified raw-`fs::` straggler table (host-path touches that bypass emulated IO — route through the
-bundle).** Audited across the boot sequence + modules; all P0:
-
-| Site | What it does | Fix |
+| Site | What it does | Hook |
 |---|---|---|
-| `io/src/io.cpp:72` `vfs::read_app_file` | param.sfo + loader whole-file reads | route through bundle pread |
-| `module_parent` `translate_path` (module loads) | loads `app0:...` modules | served by the mount once app0 routed |
-| `interface.cpp:500-509` (`add_preload_module`) **[NEW]** | raw `fs::exists` on `ux0/app/<app_path>/sce_module/*.suprx` to decide whether to preload app-supplied `libc`/`libfios2`/… ; when it passes the *load* goes through `app0:sce_module/...` (already served) | route only the **existence probe** to `bundle.exists()`. Silent-compat-bug factory if missed. |
-| `app/src/app.cpp:277-279` (`prepare_game_launch_overlay`) **[NEW]** | stores a **host path string** `renderer.precompile_bg_path = <ux0/app/.../sce_sys/pic0.png>`, consumed later by the renderer thread via `overlay::image_info(path)` (`renderer/src/batch.cpp:190-237`) | **not a one-line exists-swap** — extract `pic0.png` from the bundle to a cache file and point the string there (or teach `image_info` to take bytes) |
-| `modules/SceAppUtil/SceAppUtil.cpp:164-166` `is_addcont_exist` | builds `ux0/<addcont0>/<path>` + `fs::exists && !is_empty`; DLC detection | consult the mount, else DLC silently missing |
-| `modules/SceAvPlayer/SceAvPlayer.cpp:245-246` | `expand_path` → `fs::exists` → opens host file directly when the game supplies no IO callbacks; FMV | route through the bundle pread path |
+| `io.cpp` `vfs::read_app_file` | param.sfo + loader whole-file reads | now takes `IOState&`; `try_read_ux0_file` first, else host |
+| `module_parent.cpp` `load_module` | loads `app0:…` modules | `try_read_ux0_file`; also **skips the host-FS case-insensitive fallback** when the mount covers the path (the Android fix) |
+| `interface.cpp:506` (`add_preload_module`) | existence probe for app-supplied `sce_module/*.suprx` | `try_exists_ux0` |
+| `app/src/app.cpp:277` (`prepare_game_launch_overlay`) | renderer wants a **host path** to `pic0.png` | extracts pic0 from the bundle to a cache file, points the string there |
+| `SceAppUtil.cpp` `is_addcont_exist` | DLC detection (`exists && !is_empty`) | `try_exists_ux0` (dir "exists" == non-empty, matching the host check) |
+| `SceAvPlayer.cpp` `sceAvPlayerAddSource` | FMV opened as a host file when the game gives no IO callbacks | extracts the media from the bundle to a temp cache file |
+| `SceAppMgr.cpp` `_sceAppMgrLoadExec` | loads an exec from the app tree | `read_app_file(io, …)` |
 
-**[CORRECTED]** `interface.cpp:94-98` (license/`work.bin`) is **removed** from this list — it is
-install-time (`is_nonpdrm`), not a boot straggler (see §3).
+- **Decrypt reuses existing code**: `install_pkg` (`pkg.cpp`) gained a `temp_root` parameter — when set,
+  it decrypts the pkg into `temp_root/app` and **skips** the `ux0/app` copy, but still writes the
+  license rif to the real `ux0/license`. With no zRIF supplied it derives one from `work.bin`.
+- **Archive layer** (`packages/archive_read.*`, `archive_7z.*`, vendored `external/lzma-sdk/`): zip via
+  miniz (already in-tree), 7z via the LZMA SDK. Helpers: detect a decrypted tree vs a pkg, extract-all,
+  extract-first-pkg, read one member in memory (metadata scans).
+- **Do NOT use `-d`/`--deleted-id`** — it deletes savedata and shader cache. Nothing in the play path
+  uses it; only the mount's own `owned_temp` is removed.
+- **CI**: `.github/workflows/c-cpp.yml` builds desktop (windows-x64/arm64, linux-appimage, macos-x64/
+  arm64) and android (APK) on every push; it also has a `workflow_dispatch` trigger.
 
-- **GUI reads app dirs directly** (`gui-qt/src/apps_list_*.cpp`, `live_area_widget.cpp:254` reads
-  `pic0.png` via `QFile`; Android: `AppsListViewModel.kt` / `AppRepository`). **P3** library
-  integration reads `param.sfo` / `icon0.png` through the bundle reader and caches metadata per
-  bundle. (The Qt live-area `pic0` read is P3, distinct from the P0 renderer path above.)
-- **Import reuses existing, battle-tested code**: `install_pkg` (`pkg.cpp:79`) extracts,
-  PFS-decrypts, routes by category (`app` / `addcont/<ID>/<CID>` / `patch/<ID>`, `pkg.cpp:218-232`),
-  derives the title ID from the pkg header (`content_id.substr(7, 9)`, `pkg.cpp:369`), and writes
-  licenses. On Android, `InstallForegroundService` / `InstallServiceController` already accept
-  `EXTRA_PATH` / `EXTRA_ZRIF` / `EXTRA_LICENSE_PATH` — add an "import to bundle" operation type to
-  this service rather than inventing a new one.
-- **Do NOT use `-d`/`--deleted-id`** — it deletes savedata and the shader cache along with the app
-  (`main.cpp:135`; `config.cpp:358`). Import cleanup removes only the temporary install directories
-  it created.
-- **CI**: desktop-build (`ci-linux-clang-appimage`, Qt 6.11.0, clang/cmake/ninja/Vulkan) and
-  android-build (`.github/workflows/c-cpp.yml`). The android job produces the APK on every push.
+## 6. Data-Safety Invariants (test them)
 
-## 5. Implementation Phases
-
-Work desktop-first, flip to Android per phase. Each phase must be green before the next. Keep new
-code in new files (`io/src/bundle.cpp`, `bundle_zip.cpp`, `io/include/io/bundle.h`, …); keep diffs
-inside existing files minimal.
-
-**P0 — Mount core + directory backend (desktop).** Read-only bundle interface
-(`pread`/`stat`/`list_dir`/`exists`) with a *directory* backend. Add bundle-backed fd-table entries,
-route the §4 op surface, wire `app0:`/`addcont0:` roots, add a dev-only `--bundle <path>` boot flag,
-route `vfs::read_app_file`, `module_parent`, AvPlayer, `is_addcont_exist`, the sce_module preload
-probe, and pic0.
-- [ ] A game folder copied outside `ux0` boots via `--bundle`; saves write normally
-- [ ] Write/rename/remove into `app0:` returns EROFS and the game still runs
-- [ ] An FMV-heavy title plays video (AvPlayer routed)
-- [ ] A DLC title detects and loads its DLC from the bundle's `addcont/` (rifs hand-placed in
-      `ux0/license/<TITLEID>/` until the importer exists)
-
-**P1 — Zip backend.** STORE-zip reader: parse central directory once → entry map → `pread` = offset
-read on a single host fd; zip64; enforce method 0 + manifest version at mount. Reuse the
-case-insensitive fallback pattern from `io.cpp`.
-- [ ] Same acceptance as P0 but from a `.zip`; plus a >4 GiB game boots (zip64)
-- [ ] Integrity harness: every file read via emulated IO hash-matches the pre-zip originals
-
-**P2 — Import pipeline.** Desktop CLI + GUI action and Android service op: base pkg + zRIF, optional
-update pkg, optional DLC pkgs + zRIFs → temp-install via existing `install_pkg` → **merge update over
-base is automatic** (see §9/Q1: `copy_path` overwrites into `ux0/app/<TITLEID>` at install) → write
-bundle zip → copy rifs to `ux0/license/<TITLEID>/` → verify (reopen zip, spot-read + manifest) →
-delete temp dirs; optionally delete source pkgs only after verification passes.
-- [ ] Import of base+update+DLC produces one zip; game boots patched with DLC visible
-- [ ] Re-import is idempotent; cancel/failure leaves no temp litter and never touches saves
-- [ ] Progress UI on Android via the existing foreground-service pattern
-
-**P3 — Library + external launch.** Bundle library folder in settings; desktop Qt list and Android
-`AppRepository` show bundle games (title/icon read through the bundle reader, cached). Android:
-exported activity/intent accepting a bundle file path. Document the ES-DE Android custom system entry.
-- [ ] Tapping a bundle in-library boots it; ES-DE Android launches a named zip end-to-end
-
-**P4 — Polish.** Corrupt-zip and wrong-version error UX; "remove bundle" that demonstrably never
-touches `ux0/user` (saves) or licenses; README for the fork.
-
-## 6. Open Questions — status
-
-- **Q1 (was blocking P2): RESOLVED** — see §9. In-place overwrite at install time; importer merges
-  base+update for free.
-- **Q2 (was blocking P0): RESOLVED** — see §4 straggler table + §9.
-- **Q3 (was blocking P0): RESOLVED** — see §9 (fd table + addcont trigger).
-- **Q4 (non-blocking):** `StorageAccess.kt` — confirm the native side receives plain paths (not
-  per-read SAF), so zip preads are raw-file speed on Android. (P0-Android.)
-- **Q5 (non-blocking until P3):** ES-DE Android's current Vita3K launch mechanism.
-- **Q6 (non-blocking):** Trophy `.trp` access path — confirm it flows through emulated IO (then the
-  mount serves it for free). (P4.)
+- Nothing under `ux0/user` (saves) or `ux0/license` is ever **written or deleted** by the mount. (The
+  License folder only **adds** `.rif` files to `ux0/license`; it never removes anything.)
+- Everything the play path decrypts lives under `<cache>/pkgplay` and is deleted on exit; deleting or
+  moving a source archive never touches saves, trophies, or licenses.
+- The mount is read-only end to end: any write/rename/remove/create/truncate under `app0:`/`addcont0:`
+  returns `EROFS` and the game keeps running.
 
 ## 7. Constraints & Fork Hygiene
 
-- Simplest thing that works; do not touch code unrelated to the task; flag uncertainty and stop
-  rather than guess; no speculative abstractions beyond the bundle interface defined here.
-- **Rebase strategy:** new functionality in new files; existing-file diffs limited to routing hooks.
-  Expect upstream churn in `io.cpp` and the Android UI; keep hooks few and obvious.
-- **License:** Vita3K is GPLv2 — the fork and any distributed APKs must remain GPL-compliant.
-- **Data-safety invariants (test them):** nothing under `ux0/user` (saves) or `ux0/license` is ever
-  written or deleted by mount, import cleanup, or bundle removal.
+- Simplest thing that works; do not touch code unrelated to the task; no speculative abstractions beyond
+  the mount interface.
+- **Rebase strategy:** new functionality in new files (`io/bundle.*`, `packages/archive_*`,
+  `app/roms_list.cpp`, `external/lzma-sdk/`, these docs); existing-file diffs limited to the routing
+  hooks in §5. See `docs/game-bundle/updating.md`.
+- **License:** Vita3K is GPLv2 — the fork and any distributed APKs must remain GPL-compliant. The
+  vendored LZMA SDK is public-domain, compatible.
 
-## 8. Parked / Phase Next
+## 8. Parked / Not Built
 
-- **Pkg-direct backend:** pkg AES-CTR reader + psvpfstools refactored into a seekable per-sector PFS
-  reader + N simultaneous mounts with patch union, all behind the same bundle interface.
-- **Seekable compression** (zstd-seekable or chunked-deflate) — bump `vita3k_bundle.json` version.
-- **NoNpDrm-dump import** (`decrypt_install_nonpdrm`, `pkg.cpp:59`) as an alternate import source.
-
-## 9. P0 Kickoff — Verified Findings (2026-07-05, commit `24a401f`)
-
-**Q1 — app vs patch → in-place overwrite at *install* time.** There is no runtime `ux0/patch`
-consumer. `copy_path` (`io.cpp:785-797`) copies the `gp` patch staging dir's contents *into*
-`ux0/app/<TITLEID>` (`copy_directory_contents` defaults to `overwrite_existing`, `util/fs.h:83` — a
-true union: patch files overwrite, untouched base files persist), then `fs::remove_all`s the staging
-dir. `install_pkg` funnels through the same `copy_path` (`pkg.cpp:347`). The only other `ux0/patch`
-mention (`apps_list.cpp:496`) is delete-app housekeeping, not a data path. → Importer: temp-install
-base, then temp-install update into the same `ux0`; the merged `ux0/app/<TITLEID>` is the bundle
-`app/`. No runtime union, no patch dir in the bundle.
-
-**Q2 — boot-sequence raw-`fs::` audit.** See the §4 straggler table (6 route points; 2 newly found:
-sce_module preload probe `interface.cpp:500-509`, pic0 `app.cpp:277-279`). The license check
-`interface.cpp:94-98` is install-time, not a boot straggler. No additional app-dir existence gate
-exists in the `-r`/auto-boot path (`main.cpp:195-253`) — the boot gate is the in-memory apps-list
-lookup in `set_app_info`, which `--bundle` populates via a synthetic `AppEntry`. **Straggler #7
-audit: none found.**
-
-**Q3 — fd table + addcont trigger.** `IOState` (`io/include/io/state.h:97-131`) holds
-`std::map<SceUID,FileStats> std_files` + `std::map<SceUID,DirStats> dir_entries` keyed off one
-monotonic `io.next_fd`. `FileStats`/`DirStats` are concrete value types (not polymorphic); IO methods
-in `io/src/state_functions.cpp:41-110`. `FileStats::read` guards `if (!wrapped_file) return -1`, so a
-bundle-backed `FileStats` has a null host stream and branches to `bundle->pread`. **Design decision:**
-augment `FileStats`/`DirStats` with an optional bundle backend + a second constructor (minimal
-op-function diffs) rather than a parallel fd map or a polymorphic refactor. `io.app_path`/`io.addcont`
-are set in `set_app_info` (`apps_list.cpp:580-584`), cleared in `io_deinit` (`io.cpp:144`).
-
-**Environment note.** Baseline desktop build is blocked on the dev box (no clang/cmake/ninja/
-pkg-config/Vulkan/Qt6; no passwordless sudo). Proceeding code-first per owner decision; compile/run
-verification deferred to a provisioned toolchain or CI.
+- **Persistent STORE-zip backend** (the original brief's "P1"): a zip reader that `pread`s members off a
+  single host fd, so the game plays straight from the `.zip` with **no temp extraction**. Not built —
+  decrypt/unpack-to-temp does the job at the cost of transient disk + a per-boot unpack. This is the
+  main thing that would make large games boot faster and use less scratch space.
+- **Seekable compression** (zstd-seekable / chunked-deflate) for a compressed bundle format — the
+  manifest carries a `version` field for this.
+- **A true random-access PFS reader** (decrypt pkg sectors on demand instead of all at once) — the
+  original top risk; unnecessary given decrypt-to-temp.
