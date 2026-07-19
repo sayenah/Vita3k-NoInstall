@@ -83,7 +83,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # GITHUB_TOKEN pushes don't auto-trigger Build CI, so dispatch it explicitly against
-          # the freshly-pushed branch tip. Publish Release then fires when the build succeeds.
+          # the freshly-pushed branch tip. Build CI publishes the "latest" Release itself, in the
+          # same run (see the publish-noinstall-release job) — no separate publish workflow to be
+          # suppressed by the GITHUB_TOKEN anti-recursion rule.
           gh workflow run c-cpp.yml --ref feature/game-bundle -R "${{ github.repository }}"
           echo "Rebased onto ${{ steps.rebase.outputs.target }} and started a build."
           echo "A new Release (APK + Windows zip) will appear when the build finishes."

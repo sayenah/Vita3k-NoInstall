@@ -82,11 +82,17 @@ Workflows (all conflict-free, since they're new files upstream never touches):
   commits onto the chosen upstream ref, force-pushes, then dispatches Build CI. On a
   rebase conflict it opens an issue and stops (no push). To turn off the weekly run,
   delete the `schedule:` block.
-- **`.github/workflows/publish-release.yml`** — after Build CI succeeds on our branch,
-  downloads the Android + Windows artifacts and (re)publishes them as the `latest`
-  Release. Ignores pull-request builds.
-- **`c-cpp.yml`** got a one-line `workflow_dispatch:` trigger so the update workflow can
-  start it (a `GITHUB_TOKEN` push does not fire push-triggered workflows).
+- **`c-cpp.yml`** — Build CI. Two fork changes: a `workflow_dispatch:` trigger so the update
+  workflow can start it (a `GITHUB_TOKEN` push does not fire push-triggered workflows), and a
+  final **`publish-noinstall-release`** job that packages the Android + Windows artifacts and
+  (re)publishes them as the `latest` Release **in the same run**. It runs on branch pushes and
+  update-workflow dispatches (never on pull requests), `if: always()` so a partial matrix (the
+  macOS legs fail on infra) still publishes whatever built.
+
+  > This replaced a separate `publish-release.yml` that fired on a `workflow_run` trigger.
+  > GitHub suppresses that downstream event for builds started via the update workflow's
+  > `GITHUB_TOKEN` dispatch, so auto-update builds never published — the release went stale even
+  > after a clean build. Publishing from inside the build run sidesteps the token rule entirely.
 
 Local equivalents live in `tools/` (`update-from-upstream.sh`, `fetch-latest-build.sh`)
 and the rebase reference is `docs/game-bundle/updating.md`. When the auto-rebase opens a
