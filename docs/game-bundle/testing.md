@@ -34,12 +34,14 @@ still lives in the emulator's data folder. So that folder must have:
 > `ux0/license/...` on the real filesystem. If it's missing, boot logs a warning and you get a black
 > screen / module-load errors.
 
-## 3. The easy path — a ROMs folder
+## 3. The easy path — ROMs folders
 
-1. Put your games (each a `.pkg`, or a `.zip`/`.7z` of a NoNpDrm dump) anywhere in one folder.
+1. Put your games (each a `.pkg`, or a `.zip`/`.7z` of a NoNpDrm dump) in one or more folders.
    Sub-folders are fine — the scan is recursive.
-2. **Set the folder:** desktop, right-click the games list → **Set ROMs Folder…**; Android, the apps-list
-   overflow menu → **Set ROMs Folder…**.
+2. **Add the folder(s):** desktop, right-click the games list → **ROMs Folders → Add Folder…**;
+   Android, the apps-list overflow menu → **ROMs Folders…** → **Add Folder…**. Repeat for as many
+   folders as you like (e.g. internal storage + SD card) — the library shows the union of all of
+   them. Remove a folder from the same menu/dialog; its games drop out of the list.
 3. The games appear in the library with their real names and icons. **Tap one to play** — it decrypts to a
    temp folder, mounts it read-only, boots, and cleans up the temp folder when you quit.
 
@@ -64,6 +66,10 @@ Vita3K.exe --play-pkg "C:\games\Persona 4 Golden.pkg"
 
 Accepts a NoNpDrm `.pkg`, or a `.zip`/`.7z` containing either a `.pkg` or an already-decrypted `app/`
 tree. Updates/DLC/licenses are still pulled from the configured folders (§5) if set.
+
+`--play-pkg` and `--bundle` auto-detect what they're given: a regular **file** routes through
+play-without-install, a **directory** mounts as a prepared Game Bundle (§6). Frontends can use either
+flag with either kind of path.
 
 ## 5. DLC, updates, and licenses (side folders)
 
@@ -138,8 +144,28 @@ The `.Emulator` activity is exported and self-initializes native, so this works 
 
 - A debug APK's package is `org.vita3k.emulator.debug` (check with `adb shell pm list packages | grep
   vita3k`). Make sure the emulator isn't already mid-game — the fresh-launch path is what reads it.
-- **ES-DE:** point the Vita3K launch command at `org.vita3k.emulator/.Emulator` with
-  `-e bundle_path <ROM path>`.
+
+### ES-DE (Android and Windows)
+
+The launch entry points auto-detect what they're handed: an archive **file** (`.zip`/`.7z`/`.pkg`)
+plays without install, a **directory** mounts as a prepared bundle. So ES-DE just passes the ROM path.
+
+- **Windows** (`es_systems.xml` custom entry) — do NOT reuse the stock `.psvita` command (it feeds a
+  title id to `-r`, which only accepts installed games):
+
+  ```xml
+  <command label="Vita3K NoInstall">%EMULATOR_VITA3K% --play-pkg %ROM%</command>
+  ```
+
+- **Android** (custom system entry) — target the exported activity and pass the ROM in an extra;
+  `archive_path` is the archive-specific extra, and `bundle_path` works too (auto-detected):
+
+  ```xml
+  <command label="Vita3K NoInstall">%EMULATOR_VITA3K%%EXTRA_archive_path%=%ROM%</command>
+  ```
+
+  Quick end-to-end test without ES-DE:
+  `adb shell am start -n org.vita3k.emulator/org.vita3k.emulator.Emulator -e archive_path /sdcard/ROMs/psvita/Game.zip`
 
 ## 7. Acceptance checks
 
