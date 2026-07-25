@@ -1,82 +1,133 @@
-# Vita3K
+<div align="center">
 
-[![C/C++ CI](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml)
-[![Release](https://img.shields.io/github/v/release/Vita3K/Vita3K-builds?include_prereleases)](https://github.com/Vita3K/Vita3K/releases)
-[![Vita3K discord server](https://img.shields.io/discord/408916678911459329?color=5865F2&label=Vita3K%20&logo=discord&logoColor=white)](https://discord.gg/6aGwQzh)
+# 🎮 Vita3K‑NoInstall
 
-## Introduction
+### Play your PS Vita games straight from `.zip` / `.7z` / `.pkg` files — no install step, ever.
 
-Vita3K is an experimental PlayStation Vita emulator for Windows, Linux, macOS and Android.
+[![Build CI](https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/c-cpp.yml/badge.svg?branch=feature%2Fgame-bundle)](https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/c-cpp.yml)
+[![Latest release](https://img.shields.io/badge/release-latest-blue)](https://github.com/sayenah/Vita3k-NoInstall/releases/latest)
+[![License: GPL v2](https://img.shields.io/badge/license-GPLv2-orange)](./COPYING.txt)
+[![Upstream](https://img.shields.io/badge/fork%20of-Vita3K-red)](https://github.com/Vita3K/Vita3K)
 
-* [Website](https://vita3k.org/) (information for users)
-* [Wiki](https://github.com/Vita3K/Vita3K/wiki) (information for developers)
-* [Discord server](https://discord.gg/MaWhJVH) (recommended)
+**A friendly fork of [Vita3K](https://github.com/Vita3K/Vita3K), the experimental PS Vita emulator —
+with the install ritual removed.**
 
-## Compatibility
+[![Download for Windows](https://img.shields.io/badge/⬇%20Windows%20x64-Vita3K--NoInstall--windows--x64.zip-2ea44f?style=for-the-badge)](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall-windows-x64.zip)
+[![Download for Android](https://img.shields.io/badge/⬇%20Android-Vita3K--NoInstall.apk-2ea44f?style=for-the-badge&logo=android&logoColor=white)](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall.apk)
 
-The emulator currently runs most homebrew programs and commercial games.
+</div>
 
-- [Homebrew compatibility page](https://vita3k.org/compatibility-homebrew.html)
-- [Commercial compatibility page](https://vita3k.org/compatibility.html)
+---
 
-## Gallery
+## Why?
 
-|               **Persona 4 Golden** by Atlus                   |                     **A Rose in the Twilight** by Nippon Ichi Software                         |
-| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Persona 4 Golden screenshot](./_readme/screenshots/P4G.png) | ![A Rose in the Twilight screenshot](./_readme/screenshots/A%20Rose%20in%20the%20Twilight.png) |
+Stock Vita3K asks you to **install** every game: each `.pkg` gets unpacked into the emulator's data
+folder, so you keep two copies (the pkg *and* the install), your games hide behind cryptic
+`PCSE00123` folder names, and front-ends like ES-DE can't just launch a file.
 
-|                  **Alone with You** by Benjamin Rivers                     |                 **VA-11 HALL-A** by Sukeban Games                    |
-| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Alone with You screenshot](./_readme/screenshots/Alone%20With%20You.png) | ![VA-11 HALL-A screenshot](./_readme/screenshots/VA-11%20HALL-A.png) |
+**Vita3K‑NoInstall boots the file directly.** Keep one nicely-named archive per game, anywhere you
+like — internal storage, SD card, a NAS folder — and just press play.
 
-|              **Fruit Ninja** by Halfbrick Studios                  |                **Jetpack Joyride** by Halfbrick Studios                    |
-| :----------------------------------------------------------------: | :------------------------------------------------------------------------: |
-| ![Fruit Ninja Screenshot](./_readme/screenshots/Fruit%20Ninja.png) | ![Jetpack Joyride Screenshot](./_readme/screenshots/Jetpack%20Joyride.png) |
+## How it works
 
-## License
+| | |
+|---|---|
+| 🗜️ **1. You pick a game** | A NoNpDrm `.pkg`, or a `.zip`/`.7z` of a decrypted dump — from the built-in library, ES-DE, a file manager, or the command line. |
+| 🔓 **2. It unpacks to a private temp folder** | Decrypted on the fly (updates merged in, DLC attached, licenses applied — see below). |
+| 🎮 **3. It boots from a read-only mount** | The game sees a normal `app0:`; every write attempt is safely refused. **When you quit, the temp folder is deleted.** Nothing is ever installed. |
 
-Vita3K is licensed under the **GPLv2** license. This is largely dictated by external dependencies, most notably Unicorn.
+Your **saves, trophies, and licenses live in the normal Vita3K data folder** the whole time — moving
+or deleting a game file never touches them.
 
-## Downloads
+## Features
 
-You can download the latest builds from [here](https://github.com/Vita3K/Vita3K/releases/tag/continuous).
+- 📚 **ROMs library** — point the emulator at your games folder(s) and every `.zip`/`.7z`/`.pkg`
+  shows up with its real title and icon. **Multiple folders supported** (e.g. internal + SD card);
+  sub-folders are scanned too.
+- 🕹️ **ES-DE ready** — launch games by file path from ES-DE on **Android and Windows** (setup
+  snippet below). The launcher auto-detects what it's handed, so any front-end that passes a path works.
+- 🩹 **Updates folder** — drop update pkgs in one folder; the newest matching patch is applied
+  automatically at launch. No install.
+- 🧩 **DLCs folder** — same idea for DLC: pkgs, folders, or per-game zips, matched by title id and
+  mounted at launch.
+- 🔑 **License folder** — keep your `.rif` licenses in one tree (there's a
+  [tool](./tools/build-license-folder.py) that builds it from NoPayStation `.tsv` files) and every
+  game/update/DLC key is applied automatically.
+- 🔄 **Self-updating** — every Monday the fork rebases itself onto the newest official Vita3K and
+  publishes a fresh build. There's also a one-click button ([how-to](./docs/game-bundle/getting-builds.md)).
+- 🖥️ **All Vita3K goodness** — this fork *adds* features; normal installs, settings, save data, and
+  compatibility are exactly upstream Vita3K.
 
-* Windows
-  * Requirements:
-    * [Microsoft Visual C++ 2015-2022 Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-* Linux
-  * Arch based:
-    * [vita3k-bin](https://aur.archlinux.org/packages/vita3k-bin)<sup><small>AUR</small></sup>
-    * [vita3k-git](https://aur.archlinux.org/packages/vita3k-git)<sup><small>AUR</small></sup>
-  * Requirements:
-    * xdg-desktop-portal
-* Android
-    * [Adreno drivers](https://github.com/K11MCH1/AdrenoToolsDrivers/releases/)
-* Others
-  * [Download Artifact](https://github.com/Vita3K/Vita3K/actions?query=event%3Apush+is%3Asuccess+branch%3Amaster)
-  * [Old builds](https://github.com/Vita3K/Vita3K-builds/releases)
+## Quick start
 
-## Building
+> **Prerequisite (one-time):** like stock Vita3K, you need the **PS Vita firmware** installed and your
+> games' **licenses** available — easiest is pointing the fork at an existing Vita3K data folder, using
+> the License folder, or playing self-contained NoNpDrm dumps (their license is applied automatically).
+> Details in the [testing guide](./docs/game-bundle/testing.md).
 
-Please see [`building.md`](./building.md).
+**Windows**
+1. Download [`Vita3K-NoInstall-windows-x64.zip`](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall-windows-x64.zip), extract, run `bin/Vita3K.exe`.
+2. Right-click the games list → **ROMs Folders → Add Folder…** and pick where your games live.
+3. Double-click a game. That's it.
 
-## Running
-Check our [quickstart guide](https://vita3k.org/quickstart) to make sure your computer meets the minimum requirements to run Vita3K.  
-Don't forget to have your graphics driver up to date and to install the [Visual C++ 2015-2022 Redistributable](https://aka.ms/vs/17/release/VC_redist.x64.exe) if you are a Windows user.  
+**Android**
+1. Download and install [`Vita3K-NoInstall.apk`](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall.apk).
+2. Apps list → **⋮ → ROMs Folders… → Add Folder…**.
+3. Tap a game. That's it.
 
-## Bugs and issues
-The project is in an early stage, so please be mindful when opening new issues. Expect crashes, glitches, low compatibility and poor performance.
+**Command line** (Windows/Linux/macOS)
 
-## Thanks
-Thanks go out to people who offered advice or otherwise made this project possible, such as Davee, korruptor, Rinnegatamante, ScHlAuChi, Simon Kilroy, TheFlow, xerpi, xyz, Yifan Lu and many others.
+```
+Vita3K --play-pkg "D:\Games\Persona 4 Golden.zip"
+```
 
-## Donations
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/vita3k)
-<br>
-Thank you to the supporters and to all those who support us on our [ko-fi](https://ko-fi.com/vita3K).
-* Among them, those who subscribed to the Nibble Tier and upper: **j0hnnybrav0, Mored4u, TacoOblivion, Undeadbob and uplush**
+## ES-DE setup
 
-## Note
-The purpose of this emulator is not to enable illegal activity. You can dump games from a Vita by using [NoNpDrm](https://github.com/TheOfficialFloW/NoNpDrm) or [FAGDec](https://github.com/CelesteBlue-dev/PSVita-RE-tools/tree/master/FAGDec/build). You can get homebrew programs from [VitaDB](https://www.rinnegatamante.eu/vitadb/#/).
+The stock ES-DE Vita3K config expects installed games (`.psvita` title-id files) — replace the launch
+command in your custom system entry:
 
-PlayStation, PlayStation Vita and PlayStation Network are all registered trademarks of Sony Interactive Entertainment Inc. This emulator is not related to or endorsed by Sony, or derived from confidential materials belonging to Sony.
+**Windows** (`es_systems.xml`):
+```xml
+<command label="Vita3K NoInstall">%EMULATOR_VITA3K% --play-pkg %ROM%</command>
+```
+
+**Android**:
+```xml
+<command label="Vita3K NoInstall">%EMULATOR_VITA3K%%EXTRA_archive_path%=%ROM%</command>
+```
+
+Add `.zip`, `.7z` and `.pkg` to the system's extension list, and ES-DE launches your games end-to-end.
+
+## Downloads & staying current
+
+Grab the newest build any time from **[Releases → latest](https://github.com/sayenah/Vita3k-NoInstall/releases/latest)**.
+It refreshes automatically every Monday when upstream Vita3K changes; the
+[builds guide](./docs/game-bundle/getting-builds.md) shows the one-click "build now" button and what to
+do if an update ever needs a human. Linux and macOS builds are available as
+[CI artifacts](https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/c-cpp.yml).
+
+## For developers
+
+| Doc | What's inside |
+|---|---|
+| [brief.md](./docs/game-bundle/brief.md) | Architecture: the read-only mount, decrypt-to-temp pipeline, verified code map |
+| [testing.md](./docs/game-bundle/testing.md) | How to test every path: ROMs library, CLI flags, adb/ES-DE, acceptance checks |
+| [updating.md](./docs/game-bundle/updating.md) | Rebasing the fork onto newer upstream Vita3K |
+| [getting-builds.md](./docs/game-bundle/getting-builds.md) | The CI/release automation, for users and maintainers |
+| [building.md](./building.md) | Building from source (unchanged from upstream) |
+
+The fork is a small, rebase-friendly patch series: almost all code lives in new files
+(`io/bundle.*`, `packages/archive_*`, `app/roms_list.cpp`), with minimal hooks in upstream files.
+
+## Credits & license
+
+All emulation is the work of the amazing **[Vita3K team](https://github.com/Vita3K/Vita3K)** — support
+them on [ko-fi](https://ko-fi.com/vita3k). This fork only changes *how games are loaded*.
+
+Licensed under **[GPLv2](./COPYING.txt)**, same as upstream.
+
+> **Note:** this project does not enable piracy. Play games you own — dump them from your own Vita
+> with [NoNpDrm](https://github.com/TheOfficialFloW/NoNpDrm) or
+> [FAGDec](https://github.com/CelesteBlue-dev/PSVita-RE-tools/tree/master/FAGDec/build). PlayStation,
+> PlayStation Vita and PlayStation Network are registered trademarks of Sony Interactive Entertainment
+> Inc. This emulator is not related to or endorsed by Sony.
