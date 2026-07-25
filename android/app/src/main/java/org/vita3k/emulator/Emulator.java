@@ -189,16 +189,19 @@ public class Emulator extends SDLActivity
         if (args != null && args.length > 0)
             return args;
 
-        // Boot directly from a Game Bundle directory (dev/testing + external launchers like ES-DE).
-        // The path comes from the bundle_path extra or a VIEW data URI (file:// path).
+        // Boot directly from a path handed over by an external launcher (ES-DE) or a VIEW data URI.
+        // Auto-detect what the path is: a regular FILE (.zip/.7z/.pkg) plays without install via the
+        // archive route; a DIRECTORY mounts as a prepared Game Bundle. Frontends can therefore pass
+        // whatever they track in either the bundle_path extra or a file:// URI and it just works.
         String bundlePath = intent.getStringExtra(EXTRA_BUNDLE_PATH);
         if ((bundlePath == null || bundlePath.isEmpty()) && intent.getData() != null)
             bundlePath = intent.getData().getPath();
         if (bundlePath != null && !bundlePath.isEmpty()) {
             String bundleTitleId = intent.getStringExtra(EXTRA_TITLE_ID);
+            String flag = new java.io.File(bundlePath).isFile() ? "--play-archive" : "--bundle";
             if (bundleTitleId != null && !bundleTitleId.isEmpty())
-                return new String[]{"--bundle", bundlePath, "-r", bundleTitleId};
-            return new String[]{"--bundle", bundlePath};
+                return new String[]{flag, bundlePath, "-r", bundleTitleId};
+            return new String[]{flag, bundlePath};
         }
 
         // Play a game from an archive (.zip/.7z/.pkg) with no install (a ROM-library entry).

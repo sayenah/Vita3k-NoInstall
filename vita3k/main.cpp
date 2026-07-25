@@ -37,6 +37,7 @@
 #include <packages/pkg.h>
 #include <packages/sfo.h>
 #include <shader/spirv_recompiler.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
 
@@ -251,6 +252,16 @@ int main(int argc, char *argv[]) {
         if (!app::init_apps_list(emuenv)) {
             LOG_ERROR("Failed to refresh apps list after content install.");
         }
+    }
+
+    // Frontends (ES-DE etc.) don't need to pick the right flag: --bundle pointed at an archive FILE
+    // behaves like --play-pkg, and --play-pkg pointed at a DIRECTORY behaves like --bundle.
+    if (emuenv.cfg.bundle_path.has_value() && !emuenv.cfg.play_pkg_path.has_value() && fs::is_regular_file(*emuenv.cfg.bundle_path)) {
+        emuenv.cfg.play_pkg_path = emuenv.cfg.bundle_path;
+        emuenv.cfg.bundle_path.reset();
+    } else if (emuenv.cfg.play_pkg_path.has_value() && !emuenv.cfg.bundle_path.has_value() && fs::is_directory(*emuenv.cfg.play_pkg_path)) {
+        emuenv.cfg.bundle_path = emuenv.cfg.play_pkg_path;
+        emuenv.cfg.play_pkg_path.reset();
     }
 
     // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
