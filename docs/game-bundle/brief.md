@@ -61,16 +61,23 @@ Both build a read-only mount (`io.mount`, a `shared_ptr<BundleMount>`) and boot 
 A synthetic `app::AppEntry` is pushed into the in-memory apps list so `set_app_info` → `load_app`
 resolves to the mount; the real game title is loaded from the bundle's `param.sfo` at boot.
 
+**Auto-detection.** Both entry points accept either form: a regular **file** routes through
+`mount_pkg_for_play`, a **directory** mounts as a bundle. Desktop normalizes the two flags in
+`main.cpp`; Android picks `--play-archive` vs `--bundle` in `Emulator.getArguments()` based on
+`File.isFile()`. External frontends (ES-DE) therefore work with whichever flag/extra they use.
+
 ## 3. The Library + Side Folders
 
 Four folders are configurable in Settings (desktop Qt: right-click menu "Set … Folder…";
 Android: the apps-list overflow menu). All four are optional and matched to a game by **title id**.
 
-- **ROMs folder** (`cfg.roms_folder`). Scanned **recursively** for `.zip`/`.7z`/`.pkg`
-  (`app/src/roms_list.cpp:scan_roms`); each becomes a games-list row with its real title and extracted
-  `icon0.png`. Nested sub-folders are supported; two archives that share a title id (e.g. a base game and
-  a translation in sibling sub-folders) are disambiguated by appending their sub-folder name. Tapping a
-  row launches it through `mount_pkg_for_play`. Metadata is read cheaply without decrypting: from an
+- **ROMs folders** (`cfg.roms_folders`, a list; the legacy single `roms-folder` key is migrated in via
+  `app::roms_folders`). Every folder is scanned **recursively** for `.zip`/`.7z`/`.pkg`
+  (`app/src/roms_list.cpp:scan_roms`) and the library shows the union; each hit becomes a games-list row
+  with its real title and extracted `icon0.png`. Nested sub-folders are supported; overlapping roots are
+  deduplicated by archive path; two archives that share a title id (e.g. a base game and a translation)
+  are disambiguated by appending their sub-folder (and, with several roots, their folder's) name. Tapping
+  a row launches it through `mount_pkg_for_play`. Metadata is read cheaply without decrypting: from an
   archive's `sce_sys/param.sfo` member, or a raw pkg's unencrypted info-section `param.sfo`
   (`read_pkg_param_sfo`); a raw pkg's icon lives inside the encrypted PFS, so those show the default icon.
 
