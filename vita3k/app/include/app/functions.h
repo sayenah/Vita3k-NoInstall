@@ -81,7 +81,12 @@ void destroy(EmuEnvState &emuenv);
 bool init_apps_list(EmuEnvState &emuenv);
 bool scan_apps(EmuEnvState &emuenv);
 
-// Scans the configured ROMs folder (cfg.roms_folder) for .zip/.7z/.pkg games and appends a games-list
+// The effective ROMs-folder list. Folds the legacy single "roms-folder" setting into "roms-folders"
+// (in-memory; the next config save persists the migration) and returns the list. All readers and
+// writers of the ROMs folders go through this so legacy configs keep working.
+std::vector<std::string> &roms_folders(Config &cfg);
+
+// Scans the configured ROMs folders (cfg.roms_folders) for .zip/.7z/.pkg games and appends a games-list
 // row for each (real title + extracted icon), routed at launch through mount_pkg_for_play. Returns
 // the filenames it could not read, so the UI can report them. Safe to call repeatedly (idempotent).
 std::vector<std::string> scan_roms(EmuEnvState &emuenv);
