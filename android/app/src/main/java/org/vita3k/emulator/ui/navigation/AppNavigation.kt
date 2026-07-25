@@ -290,10 +290,10 @@ fun AppNavigation(
                 onCheckForUpdates = { appsListViewModel.checkForUpdates() },
                 onDismissUpdateCheckResult = { appsListViewModel.dismissUpdateCheckResult() },
                 onRefresh = { appsListViewModel.refreshAppsList(syncCompatibility = true) },
-                onSetRomsFolder = {
+                onAddRomsFolder = {
                     activity?.requestFolderPath { path ->
                         if (!path.isNullOrEmpty()) {
-                            val failures = NativeLib.setRomsFolder(path)
+                            val failures = NativeLib.addRomsFolder(path)
                             appsListViewModel.refreshAppsList(syncCompatibility = false)
                             if (failures.isNotEmpty()) {
                                 Toast.makeText(
@@ -304,6 +304,9 @@ fun AppNavigation(
                             }
                         }
                     }
+                },
+                onRomsFoldersChanged = {
+                    appsListViewModel.refreshAppsList(syncCompatibility = false)
                 },
                 onSetDlcFolder = {
                     activity?.requestFolderPath { path ->
