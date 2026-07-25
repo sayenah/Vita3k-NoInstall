@@ -177,6 +177,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "cpu-opt", true, cpu_opt)                                                                \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(std::string, "roms-folder", std::string{}, roms_folder)                                        \
+    code(std::vector<std::string>, "roms-folders", std::vector<std::string>{}, roms_folders)            \
     code(std::string, "dlc-folder", std::string{}, dlc_folder)                                          \
     code(std::string, "updates-folder", std::string{}, updates_folder)                                  \
     code(std::string, "license-folder", std::string{}, license_folder)                                  \

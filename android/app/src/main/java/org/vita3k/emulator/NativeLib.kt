@@ -27,8 +27,14 @@ object NativeLib {
     external fun getAppListDetailed(): Array<NativeAppInfo>
     external fun refreshAppsList()
 
-    /** Sets the ROMs folder, persists it, rescans, and returns the names of any files that failed to load. */
-    external fun setRomsFolder(path: String): Array<String>
+    /** The configured ROMs folders (legacy single-folder configs are folded in transparently). */
+    external fun getRomsFolders(): Array<String>
+
+    /** Adds a ROMs folder, persists, rescans, and returns the names of any files that failed to load. */
+    external fun addRomsFolder(path: String): Array<String>
+
+    /** Removes a ROMs folder, persists, and rescans (its games drop out of the list). */
+    external fun removeRomsFolder(path: String)
 
     /** Sets the DLCs folder and persists it (DLC is mounted for the matching game at launch, not listed). */
     external fun setDlcFolder(path: String)
