@@ -47,6 +47,7 @@
 #include <gui-qt/vita_themes_dialog.h>
 #include <gui-qt/welcome_dialog.h>
 
+#include <algorithm>
 #include <app/functions.h>
 #include <archive.h>
 #include <audio/state.h>
@@ -1467,15 +1468,32 @@ void MainWindow::setup_toolbar() {
         });
 
         menu.addSeparator();
-        menu.addAction(tr("Set ROMs Folder…"), this, [this] {
-            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of games (.zip/.7z/.pkg)"),
-                QString::fromStdString(emuenv.cfg.roms_folder));
+        // One submenu manages the whole ROMs-folder list: an Add action plus one Remove action per
+        // configured folder. The library is the union of all of them (app::scan_roms).
+        auto *roms_menu = menu.addMenu(tr("ROMs Folders"));
+        roms_menu->addAction(tr("Add Folder…"), this, [this] {
+            auto &folders = app::roms_folders(emuenv.cfg);
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select a folder of games (.zip/.7z/.pkg)"),
+                folders.empty() ? QString() : QString::fromStdString(folders.back()));
             if (dir.isEmpty())
                 return;
-            emuenv.cfg.roms_folder = dir.toStdString();
+            const std::string dir_str = dir.toStdString();
+            if (std::find(folders.begin(), folders.end(), dir_str) == folders.end())
+                folders.push_back(dir_str);
             config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
             m_apps_list_widget->refresh(true); // rescans and reports any unreadable files
         });
+        const auto roms_folders_now = app::roms_folders(emuenv.cfg); // copy: the lambdas outlive the menu build
+        if (!roms_folders_now.empty())
+            roms_menu->addSeparator();
+        for (const auto &folder : roms_folders_now) {
+            roms_menu->addAction(tr("Remove \"%1\"").arg(QString::fromStdString(folder)), this, [this, folder] {
+                auto &folders = app::roms_folders(emuenv.cfg);
+                folders.erase(std::remove(folders.begin(), folders.end(), folder), folders.end());
+                config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+                m_apps_list_widget->refresh(true);
+            });
+        }
         menu.addAction(tr("Set DLCs Folder…"), this, [this] {
             const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of DLC (.pkg, <TITLEID>/ folders or <TITLEID>.zip)"),
                 QString::fromStdString(emuenv.cfg.dlc_folder));
