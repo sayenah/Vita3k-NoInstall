@@ -148,6 +148,10 @@ static void check_members(Config &self, const Config &rhs) {
         self.content_path = rhs.content_path;
     if (rhs.run_app_path.has_value())
         self.run_app_path = rhs.run_app_path;
+    if (rhs.bundle_path.has_value())
+        self.bundle_path = rhs.bundle_path;
+    if (rhs.play_pkg_path.has_value())
+        self.play_pkg_path = rhs.play_pkg_path;
     if (rhs.recompile_shader_path.has_value())
         self.recompile_shader_path = rhs.recompile_shader_path;
     if (rhs.delete_title_id.has_value())
@@ -353,6 +357,10 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->default_str("eboot.bin")->group("Input");
     input->add_option("--installed-path,-r", command_line.run_app_path, "Path to the installed app to run")
         ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
+    input->add_option("--bundle", command_line.bundle_path, "Path to a Game Bundle directory to mount and boot directly (dev/testing)")
+        ->default_str({})->group("Input");
+    input->add_option("--play-pkg", command_line.play_pkg_path, "Play a game without installing (unpacks to temp, deletes on exit): a NoNpDrm .pkg, or a .zip/.7z containing a .pkg or a decrypted app/ folder")
+        ->default_str({})->group("Input");
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
         ->default_str({})->group("Input");
     input->add_option("--deleted-id,-d", command_line.delete_title_id, "Title ID of installed app to delete")
@@ -386,7 +394,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->group("Modules");
     config->add_option("--log-level,-l", command_line.log_level, "Logging level:\nTRACE = 0\nDEBUG = 1\nINFO = 2\nWARN = 3\nERROR = 4\nCRITICAL = 5\nOFF = 6")
         ->check(CLI::Range( 0, 6 ))->group("Logging");
-    config->add_flag("--log-active-shaders,-S", command_line.log_active_shaders, "Log Active Shaders")
+    config->add_flag("--log-active-shaders", command_line.log_active_shaders, "Log Active Shaders")
         ->group("Logging");
     config->add_flag("--log-uniforms,-U", command_line.log_uniforms, "Log Uniforms")
         ->group("Logging");

@@ -47,6 +47,7 @@
 #include <gui-qt/vita_themes_dialog.h>
 #include <gui-qt/welcome_dialog.h>
 
+#include <algorithm>
 #include <app/functions.h>
 #include <archive.h>
 #include <audio/state.h>
@@ -64,6 +65,7 @@
 #include <np/state.h>
 #include <packages/functions.h>
 #include <packages/license.h>
+#include <packages/pkg.h>
 #include <renderer/functions.h>
 #include <renderer/shaders.h>
 #include <renderer/state.h>
@@ -85,6 +87,7 @@
 #include <QCloseEvent>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLineEdit>
@@ -866,6 +869,22 @@ void MainWindow::init_current_user() {
 }
 
 void MainWindow::on_app_selected(const app::AppEntry &app) {
+    // ROM entry: mount the archive read-only (no install) and boot the returned title id. set_app_info
+    // resolves the boot fields from the mount manifest, so nothing downstream needs to change.
+    if (!app.archive_path.empty()) {
+        std::string error;
+        const std::string title_id = mount_pkg_for_play(emuenv, fs_utils::utf8_to_path(app.archive_path), error);
+        if (title_id.empty()) {
+            QMessageBox::critical(this, tr("Cannot play game"),
+                tr("Failed to load '%1':\n%2")
+                    .arg(QString::fromStdString(app.title))
+                    .arg(QString::fromStdString(error)));
+            return;
+        }
+        boot_game(title_id);
+        return;
+    }
+
     if (emuenv.cfg.show_live_area_screen && !m_game_window)
         show_live_area(app.title_id);
     else
@@ -1446,6 +1465,61 @@ void MainWindow::setup_toolbar() {
             if (!fs::exists(elfdumps_path))
                 fs::create_directories(elfdumps_path);
             gui::utils::open_dir(elfdumps_path);
+        });
+
+        menu.addSeparator();
+        // One submenu manages the whole ROMs-folder list: an Add action plus one Remove action per
+        // configured folder. The library is the union of all of them (app::scan_roms).
+        auto *roms_menu = menu.addMenu(tr("ROMs Folders"));
+        roms_menu->addAction(tr("Add Folder…"), this, [this] {
+            auto &folders = app::roms_folders(emuenv.cfg);
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select a folder of games (.zip/.7z/.pkg)"),
+                folders.empty() ? QString() : QString::fromStdString(folders.back()));
+            if (dir.isEmpty())
+                return;
+            const std::string dir_str = dir.toStdString();
+            if (std::find(folders.begin(), folders.end(), dir_str) == folders.end())
+                folders.push_back(dir_str);
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            m_apps_list_widget->refresh(true); // rescans and reports any unreadable files
+        });
+        const auto roms_folders_now = app::roms_folders(emuenv.cfg); // copy: the lambdas outlive the menu build
+        if (!roms_folders_now.empty())
+            roms_menu->addSeparator();
+        for (const auto &folder : roms_folders_now) {
+            roms_menu->addAction(tr("Remove \"%1\"").arg(QString::fromStdString(folder)), this, [this, folder] {
+                auto &folders = app::roms_folders(emuenv.cfg);
+                folders.erase(std::remove(folders.begin(), folders.end(), folder), folders.end());
+                config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+                m_apps_list_widget->refresh(true);
+            });
+        }
+        menu.addAction(tr("Set DLCs Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of DLC (.pkg, <TITLEID>/ folders or <TITLEID>.zip)"),
+                QString::fromStdString(emuenv.cfg.dlc_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.dlc_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            // No rescan needed: DLC isn't a games-list row; it's mounted for the matching game at launch.
+        });
+        menu.addAction(tr("Set Updates Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the folder of game updates (.pkg named with the title id, <TITLEID>/ folders or <TITLEID>.zip)"),
+                QString::fromStdString(emuenv.cfg.updates_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.updates_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            // No rescan needed: an update overlays the base game at launch, it isn't a games-list row.
+        });
+        menu.addAction(tr("Set License Folder…"), this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the license folder (a <TITLEID>/<CONTENTID>.rif tree, or a license.zip of it)"),
+                QString::fromStdString(emuenv.cfg.license_folder));
+            if (dir.isEmpty())
+                return;
+            emuenv.cfg.license_folder = dir.toStdString();
+            config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+            // No rescan needed: the matching game's licenses are copied to ux0/license at launch.
         });
 
         menu.exec(pos);

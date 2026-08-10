@@ -671,6 +671,87 @@ Java_org_vita3k_emulator_NativeLib_setCurrentEmulatorPath(JNIEnv *env, jclass, j
     return JNI_TRUE;
 }
 
+static jobjectArray strings_to_java(JNIEnv *env, const std::vector<std::string> &strings) {
+    jclass string_class = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray(static_cast<jsize>(strings.size()), string_class, nullptr);
+    for (jsize i = 0; i < static_cast<jsize>(strings.size()); ++i) {
+        jstring s = env->NewStringUTF(strings[static_cast<size_t>(i)].c_str());
+        env->SetObjectArrayElement(result, i, s);
+        env->DeleteLocalRef(s);
+    }
+    return result;
+}
+
+// The configured ROMs folders (legacy single-folder configs are folded in transparently).
+JNIEXPORT jobjectArray JNICALL
+Java_org_vita3k_emulator_NativeLib_getRomsFolders(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return strings_to_java(env, {});
+    return strings_to_java(env, app::roms_folders(emuenv->cfg));
+}
+
+// Adds a ROMs folder, persists, rescans, and returns the names of any files that failed to load.
+JNIEXPORT jobjectArray JNICALL
+Java_org_vita3k_emulator_NativeLib_addRomsFolder(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return strings_to_java(env, {});
+
+    const std::string path = path_str ? jstring_to_string(env, path_str) : std::string();
+    auto &folders = app::roms_folders(emuenv->cfg);
+    if (!path.empty() && std::find(folders.begin(), folders.end(), path) == folders.end())
+        folders.push_back(path);
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+
+    return strings_to_java(env, app::scan_roms(*emuenv));
+}
+
+// Removes a ROMs folder, persists, and rescans (the folder's rows drop out of the list).
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_removeRomsFolder(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return;
+
+    const std::string path = path_str ? jstring_to_string(env, path_str) : std::string();
+    auto &folders = app::roms_folders(emuenv->cfg);
+    folders.erase(std::remove(folders.begin(), folders.end(), path), folders.end());
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+    app::scan_roms(*emuenv);
+}
+
+// Sets the DLCs folder and persists it. No rescan: DLC isn't a games-list row; it's mounted for the
+// matching game at launch.
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setDlcFolder(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return;
+    emuenv->cfg.dlc_folder = path_str ? jstring_to_string(env, path_str) : std::string();
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+}
+
+// Sets the Updates folder and persists it. No rescan: an update overlays the base game at launch.
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setUpdatesFolder(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return;
+    emuenv->cfg.updates_folder = path_str ? jstring_to_string(env, path_str) : std::string();
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+}
+
+// Sets the License folder and persists it. The matching game's rifs are copied to ux0/license at launch.
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setLicenseFolder(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return;
+    emuenv->cfg.license_folder = path_str ? jstring_to_string(env, path_str) : std::string();
+    config::save_current_config(emuenv->cfg, emuenv->config_path, {});
+}
+
 JNIEXPORT jintArray JNICALL
 Java_org_vita3k_emulator_NativeLib_saveSettings(JNIEnv *env, jclass, jstring title_id_str, jobject config_obj) {
     auto *emuenv = get_emuenv();

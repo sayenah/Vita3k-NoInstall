@@ -7,6 +7,7 @@ on:
   pull_request:
     paths-ignore:
       - '**.md'
+  workflow_dispatch: # lets the "Update from upstream" workflow trigger a build on demand
 
 env:
   BUILD_CONFIG: Release
@@ -354,3 +355,81 @@ jobs:
           repository: Vita3K
           name: "Automatic CI builds"
           body: "Corresponding commit: ${{ github.sha }}\nVita3K Build: ${{ env.BUILD_VARIABLE }}"
+
+  # Fork-specific: publish the built Android + Windows artifacts as this fork's "latest" GitHub
+  # Release, IN THE SAME RUN as the build. This replaces the old separate publish-release.yml, which
+  # fired on a `workflow_run` trigger — and GitHub suppresses that downstream event for builds the
+  # "Update from upstream" workflow starts via `gh workflow run` with the built-in GITHUB_TOKEN, so
+  # auto-update builds never actually published (the release sat stale even after a clean build).
+  # Publishing from inside the build run avoids that entirely: no cross-workflow event, no token
+  # suppression. Runs even when some matrix legs fail (the macOS runners fail on pre-existing infra)
+  # and publishes whatever artifacts exist. Never runs on pull requests.
+  publish-noinstall-release:
+    name: Publish NoInstall Release
+    needs: [desktop-build, android-build]
+    runs-on: ubuntu-latest
+    if: >
+      always() &&
+      github.repository == 'sayenah/Vita3k-NoInstall' &&
+      github.ref == 'refs/heads/feature/game-bundle' &&
+      github.event_name != 'pull_request'
+    permissions:
+      contents: write # create/replace the "latest" release
+    concurrency:
+      group: publish-noinstall-release
+      cancel-in-progress: false
+    steps:
+      # Each artifact goes to its OWN directory (merge-multiple flattens the artifact's contents into
+      # that path). download-artifact@v8 extracts straight into `path` with no per-artifact subdir, so
+      # we must not rely on a subdirectory name -- we package from these fixed paths instead.
+      - name: Download Android artifact
+        continue-on-error: true # a failed platform simply won't have an artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: vita3k-*-android
+          path: dl/android
+          merge-multiple: true
+
+      - name: Download Windows artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: vita3k-*-windows-x64
+          path: dl/windows
+          merge-multiple: true
+
+      - name: Package downloads
+        run: |
+          set -e
+          mkdir -p out
+          apk=$(find dl/android -type f -name '*.apk' 2>/dev/null | head -1)
+          if [ -n "$apk" ]; then
+            cp "$apk" "out/Vita3K-NoInstall.apk"
+            echo "Android APK packaged."
+          else
+            echo "::warning::no APK found in the build artifacts"
+          fi
+          if [ -d dl/windows ] && [ -n "$(ls -A dl/windows 2>/dev/null)" ]; then
+            (cd dl/windows && zip -qr "$GITHUB_WORKSPACE/out/Vita3K-NoInstall-windows-x64.zip" .)
+            echo "Windows zip packaged."
+          else
+            echo "::warning::no windows-x64 build found in the artifacts"
+          fi
+          ls -la out
+
+      - name: Publish/refresh the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ github.sha }}"
+          if [ -z "$(ls -A out 2>/dev/null)" ]; then
+            echo "::warning::no Android/Windows artifacts on this build run -- nothing to publish, leaving the existing release in place"
+            exit 0
+          fi
+          gh release delete latest -R "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create latest -R "${{ github.repository }}" out/* \
+            --title "Latest Vita3K-NoInstall build" \
+            --notes "Automatically built from commit \`${SHA}\`.
+
+          - **Android:** download \`Vita3K-NoInstall.apk\` and install it (allow installing from your browser/files app).
+          - **Windows:** download \`Vita3K-NoInstall-windows-x64.zip\`, unzip, and run \`bin/Vita3K.exe\`."

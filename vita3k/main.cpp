@@ -29,6 +29,7 @@
 #include <gui-qt/persistent_settings.h>
 #include <include/cpu.h>
 #include <include/environment.h>
+#include <io/bundle.h>
 #include <io/state.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
@@ -36,6 +37,7 @@
 #include <packages/pkg.h>
 #include <packages/sfo.h>
 #include <shader/spirv_recompiler.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
 
@@ -250,6 +252,65 @@ int main(int argc, char *argv[]) {
         if (!app::init_apps_list(emuenv)) {
             LOG_ERROR("Failed to refresh apps list after content install.");
         }
+    }
+
+    // Frontends (ES-DE etc.) don't need to pick the right flag: --bundle pointed at an archive FILE
+    // behaves like --play-pkg, and --play-pkg pointed at a DIRECTORY behaves like --bundle.
+    if (emuenv.cfg.bundle_path.has_value() && !emuenv.cfg.play_pkg_path.has_value() && fs::is_regular_file(*emuenv.cfg.bundle_path)) {
+        emuenv.cfg.play_pkg_path = emuenv.cfg.bundle_path;
+        emuenv.cfg.bundle_path.reset();
+    } else if (emuenv.cfg.play_pkg_path.has_value() && !emuenv.cfg.bundle_path.has_value() && fs::is_directory(*emuenv.cfg.play_pkg_path)) {
+        emuenv.cfg.bundle_path = emuenv.cfg.play_pkg_path;
+        emuenv.cfg.play_pkg_path.reset();
+    }
+
+    // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
+    // ux0/app. A synthetic apps-list entry lets the normal boot path (set_app_info -> load_app)
+    // resolve to the mounted bundle; the mount serves app0:/addcont0: reads (see io/bundle.h).
+    // NB: app::init above moved the local `cfg` into emuenv.cfg, so read the bundle path and set
+    // run_app_path on emuenv.cfg — that is the live config MainWindow boots from.
+    if (emuenv.cfg.bundle_path.has_value()) {
+        bundle::Manifest manifest;
+        std::string bundle_error;
+        auto backend = bundle::open_directory_backend(*emuenv.cfg.bundle_path, manifest, bundle_error);
+        if (!backend) {
+            LOG_CRITICAL("Failed to mount Game Bundle at {}: {}", emuenv.cfg.bundle_path->string(), bundle_error);
+            return 1;
+        }
+        emuenv.io.mount = bundle::make_mount(backend, manifest);
+
+        app::AppEntry entry;
+        entry.title_id = manifest.title_id;
+        entry.path = manifest.title_id;
+        entry.addcont = manifest.title_id;
+        entry.savedata = manifest.title_id;
+        entry.content_id = manifest.content_id;
+        entry.category = manifest.category.empty() ? "gd" : manifest.category;
+        entry.title = manifest.title_id; // real title is loaded from the bundle's param.sfo at boot
+        entry.stitle = manifest.title_id;
+        entry.app_ver = "N/A";
+        entry.parental_level = "N/A";
+        {
+            std::lock_guard<std::mutex> lock(emuenv.app.apps_list.mutex);
+            auto &apps = emuenv.app.apps_list.apps;
+            std::erase_if(apps, [&](const app::AppEntry &a) { return a.path == entry.path; });
+            apps.push_back(entry);
+        }
+        emuenv.cfg.run_app_path = manifest.title_id;
+        LOG_INFO("Mounted Game Bundle [{}] from {}; booting directly", manifest.title_id, emuenv.cfg.bundle_path->string());
+    }
+
+    // Play a self-contained NoNpDrm pkg with no permanent install: decrypt to temp, mount, boot;
+    // the temp tree is deleted when the game stops (io_deinit).
+    if (emuenv.cfg.play_pkg_path.has_value()) {
+        std::string play_error;
+        const std::string title_id = mount_pkg_for_play(emuenv, *emuenv.cfg.play_pkg_path, play_error);
+        if (title_id.empty()) {
+            LOG_CRITICAL("Failed to play pkg {}: {}", emuenv.cfg.play_pkg_path->string(), play_error);
+            return 1;
+        }
+        emuenv.cfg.run_app_path = title_id;
+        LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
     }
 
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");

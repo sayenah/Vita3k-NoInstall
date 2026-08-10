@@ -24,7 +24,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import android.widget.Toast
 import org.vita3k.emulator.MainActivity
+import org.vita3k.emulator.NativeLib
 import org.vita3k.emulator.data.AppStorage
 import org.vita3k.emulator.data.AppInfo
 import org.vita3k.emulator.ui.screens.AppInfoSheet
@@ -288,6 +290,60 @@ fun AppNavigation(
                 onCheckForUpdates = { appsListViewModel.checkForUpdates() },
                 onDismissUpdateCheckResult = { appsListViewModel.dismissUpdateCheckResult() },
                 onRefresh = { appsListViewModel.refreshAppsList(syncCompatibility = true) },
+                onAddRomsFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            val failures = NativeLib.addRomsFolder(path)
+                            appsListViewModel.refreshAppsList(syncCompatibility = false)
+                            if (failures.isNotEmpty()) {
+                                Toast.makeText(
+                                    activity,
+                                    "Could not load: " + failures.joinToString(", "),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
+                },
+                onRomsFoldersChanged = {
+                    appsListViewModel.refreshAppsList(syncCompatibility = false)
+                },
+                onSetDlcFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            NativeLib.setDlcFolder(path)
+                            Toast.makeText(
+                                activity,
+                                "DLCs folder set. DLC mounts automatically when you launch a matching game.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                },
+                onSetUpdatesFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            NativeLib.setUpdatesFolder(path)
+                            Toast.makeText(
+                                activity,
+                                "Updates folder set. The latest update applies automatically when you launch a matching game.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                },
+                onSetLicenseFolder = {
+                    activity?.requestFolderPath { path ->
+                        if (!path.isNullOrEmpty()) {
+                            NativeLib.setLicenseFolder(path)
+                            Toast.makeText(
+                                activity,
+                                "License folder set. A game's licenses are applied automatically when you launch it.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                },
                 onInstallClick = { installViewModel.showSheet() },
                 onOpenSettings = {
                     navController.navigate(ROUTE_SETTINGS) {

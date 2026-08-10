@@ -1,0 +1,116 @@
+name: Update from upstream
+
+# Rebases this fork's patches (no-install play + library UI) onto a newer upstream
+# Vita3K, then triggers a build. On a clean rebase you get a fresh Release (APK +
+# Windows zip). On a code conflict it opens an Issue instead and does not push --
+# that's the signal a developer needs to resolve it locally.
+#
+#   * "Run workflow" button (Actions tab) -- pick the upstream branch/tag to track.
+#   * Weekly auto-check (Mondays). Delete the `schedule:` block to turn that off.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream branch or tag to update to (e.g. master, v0.2.2)"
+        required: false
+        default: "master"
+  schedule:
+    - cron: "0 6 * * 1" # every Monday 06:00 UTC
+
+permissions:
+  contents: write # push the rebased branch + backup branches
+  actions: write # trigger the Build CI workflow
+  issues: write # file an issue when a rebase needs a human
+
+concurrency:
+  group: update-from-upstream
+  cancel-in-progress: false
+
+jobs:
+  rebase-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: feature/game-bundle
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "vita3k-noinstall-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Rebase onto upstream
+        id: rebase
+        run: |
+          REF="${{ github.event.inputs.upstream_ref || 'master' }}"
+          git remote add upstream https://github.com/Vita3K/Vita3K.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/Vita3K/Vita3K.git
+          git fetch upstream --tags --prune
+          if git rev-parse --verify "upstream/$REF" >/dev/null 2>&1; then TARGET="upstream/$REF"; else TARGET="$REF"; fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "Target: $TARGET"
+
+          # On the weekly auto-run, do nothing if upstream has not moved past what we're built on.
+          if [ "${{ github.event_name }}" = "schedule" ] && git merge-base --is-ancestor "$TARGET" HEAD; then
+            echo "Already up to date with $TARGET -- skipping."
+            echo "status=uptodate" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Safety snapshot of the current tip before rewriting history.
+          BACKUP="backup/auto-$(date +%Y%m%d-%H%M%S)"
+          git branch "$BACKUP" feature/game-bundle
+          git push origin "$BACKUP"
+          echo "Backup pushed: $BACKUP"
+
+          if git rebase "$TARGET"; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort || true
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.status == 'ok'
+        run: git push --force origin feature/game-bundle
+
+      - name: Trigger a build of the updated code
+        if: steps.rebase.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GITHUB_TOKEN pushes don't auto-trigger Build CI, so dispatch it explicitly against
+          # the freshly-pushed branch tip. Build CI publishes the "latest" Release itself, in the
+          # same run (see the publish-noinstall-release job) — no separate publish workflow to be
+          # suppressed by the GITHUB_TOKEN anti-recursion rule.
+          gh workflow run c-cpp.yml --ref feature/game-bundle -R "${{ github.repository }}"
+          echo "Rebased onto ${{ steps.rebase.outputs.target }} and started a build."
+          echo "A new Release (APK + Windows zip) will appear when the build finishes."
+
+      - name: File an issue if the rebase needs a human
+        if: steps.rebase.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create -R "${{ github.repository }}" \
+            --title "Upstream update needs manual conflict resolution ($(date +%Y-%m-%d))" \
+            --body "Automatic rebase of our patches onto \`${{ steps.rebase.outputs.target }}\` hit a merge conflict and was aborted (nothing was pushed; the branch is unchanged).
+
+          A developer resolves it locally:
+          \`\`\`
+          cd ~/projects/vita3k-bundle
+          tools/update-from-upstream.sh ${{ github.event.inputs.upstream_ref || 'master' }}
+          # fix the files it lists, then:
+          git add <files>; git rebase --continue
+          git push --force-with-lease origin feature/game-bundle
+          \`\`\`
+          Once pushed, a build runs and a new Release is published automatically." || true
+
+      - name: Mark the run failed on conflict
+        if: steps.rebase.outputs.status == 'conflict'
+        run: |
+          echo "::error::Rebase conflict -- see the issue that was just opened."
+          exit 1

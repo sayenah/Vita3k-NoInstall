@@ -3,6 +3,7 @@ package org.vita3k.emulator.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import org.vita3k.emulator.NativeLib
 import android.view.Gravity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -106,6 +108,11 @@ fun AppsListScreen(
     onCheckForUpdates: () -> Unit,
     onDismissUpdateCheckResult: () -> Unit,
     onRefresh: () -> Unit,
+    onAddRomsFolder: () -> Unit = {},
+    onRomsFoldersChanged: () -> Unit = {},
+    onSetDlcFolder: () -> Unit = {},
+    onSetUpdatesFolder: () -> Unit = {},
+    onSetLicenseFolder: () -> Unit = {},
     onInstallClick: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenTrophyManager: () -> Unit = {},
@@ -121,6 +128,7 @@ fun AppsListScreen(
     var actionTargetApp by remember { mutableStateOf<AppInfo?>(null) }
     var pendingAction by remember { mutableStateOf<AppAction?>(null) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    var showRomsFoldersDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -188,6 +196,22 @@ fun AppsListScreen(
                                 onRefresh = {
                                     showOverflowMenu = false
                                     onRefresh()
+                                },
+                                onRomsFolders = {
+                                    showOverflowMenu = false
+                                    showRomsFoldersDialog = true
+                                },
+                                onSetDlcFolder = {
+                                    showOverflowMenu = false
+                                    onSetDlcFolder()
+                                },
+                                onSetUpdatesFolder = {
+                                    showOverflowMenu = false
+                                    onSetUpdatesFolder()
+                                },
+                                onSetLicenseFolder = {
+                                    showOverflowMenu = false
+                                    onSetLicenseFolder()
                                 },
                                 onTrophyManager = {
                                     showOverflowMenu = false
@@ -358,6 +382,19 @@ fun AppsListScreen(
                     Text(stringResource(R.string.action_cancel))
                 }
             }
+        )
+    }
+
+    if (showRomsFoldersDialog) {
+        RomsFoldersDialog(
+            onDismiss = { showRomsFoldersDialog = false },
+            onAddFolder = {
+                // Close first: the folder picker is an activity round-trip, and the dialog would show
+                // a stale list. Reopening reads the updated folders.
+                showRomsFoldersDialog = false
+                onAddRomsFolder()
+            },
+            onFoldersChanged = onRomsFoldersChanged
         )
     }
 
@@ -651,11 +688,69 @@ private fun AppsListTitle(appVersion: String) {
     }
 }
 
+// Manages the list of ROMs folders: the library shows the union of all of them. Remove is applied
+// immediately (native persists + rescans); Add closes the dialog and launches the folder picker.
+@Composable
+private fun RomsFoldersDialog(
+    onDismiss: () -> Unit,
+    onAddFolder: () -> Unit,
+    onFoldersChanged: () -> Unit
+) {
+    var folders by remember { mutableStateOf(NativeLib.getRomsFolders().toList()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("ROMs Folders") },
+        text = {
+            ApplyDialogDim()
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (folders.isEmpty()) {
+                    Text(
+                        "No folders yet. Add one — its games (.zip/.7z/.pkg) appear in the library.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                folders.forEach { folder ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            folder,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        IconButton(onClick = {
+                            NativeLib.removeRomsFolder(folder)
+                            folders = NativeLib.getRomsFolders().toList()
+                            onFoldersChanged()
+                        }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Remove folder")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAddFolder) { Text("Add Folder…") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
 @Composable
 private fun AppsListOverflowMenu(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onRefresh: () -> Unit,
+    onRomsFolders: () -> Unit,
+    onSetDlcFolder: () -> Unit,
+    onSetUpdatesFolder: () -> Unit,
+    onSetLicenseFolder: () -> Unit,
     onTrophyManager: () -> Unit,
     onUserManagement: () -> Unit,
     onWelcomeScreen: () -> Unit,
@@ -682,6 +777,46 @@ private fun AppsListOverflowMenu(
                     )
                 },
                 onClick = onRefresh
+            )
+            DropdownMenuItem(
+                text = { Text("ROMs Folders…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onRomsFolders
+            )
+            DropdownMenuItem(
+                text = { Text("Set DLCs Folder…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onSetDlcFolder
+            )
+            DropdownMenuItem(
+                text = { Text("Set Updates Folder…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onSetUpdatesFolder
+            )
+            DropdownMenuItem(
+                text = { Text("Set License Folder…") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null
+                    )
+                },
+                onClick = onSetLicenseFolder
             )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.apps_list_menu_trophies)) },

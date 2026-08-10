@@ -107,6 +107,7 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
 
         if (!app::init_apps_list(*emuenv))
             LOG_ERROR("Failed to initialise apps list.");
+        app::scan_roms(*emuenv); // add ROMs-folder games to the list
 
         app::load_users(*emuenv);
         if (!app::ensure_current_user(*emuenv)) {
@@ -197,6 +198,7 @@ Java_org_vita3k_emulator_NativeLib_refreshAppsList(JNIEnv *, jclass) {
         return;
 
     app::scan_apps(*emuenv);
+    app::scan_roms(*emuenv);
 }
 
 JNIEXPORT jint JNICALL
