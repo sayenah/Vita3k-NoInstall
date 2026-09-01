@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: feature/game-bundle
           fetch-depth: 0
