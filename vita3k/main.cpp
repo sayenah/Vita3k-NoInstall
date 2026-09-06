@@ -36,6 +36,7 @@
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <packages/validation.h>
 #include <shader/spirv_recompiler.h>
 #include <util/fs.h>
 #include <util/log.h>
@@ -43,6 +44,8 @@
 
 #include <QApplication>
 #include <QMessageBox>
+#include <QMetaObject>
+#include <QTimer>
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -65,8 +68,219 @@
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_main.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <optional>
+#include <set>
+
+namespace {
+
+int validation_env_int(const char *name, int fallback, int minimum, int maximum) {
+    const char *value = std::getenv(name);
+    if (!value || !*value)
+        return fallback;
+
+    const int parsed = std::atoi(value);
+    if (parsed < minimum || parsed > maximum)
+        return fallback;
+    return parsed;
+}
+
+std::string json_escape(std::string value) {
+    std::string out;
+    out.reserve(value.size() + 16);
+    for (const char ch : value) {
+        switch (ch) {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            out += ch;
+            break;
+        }
+    }
+    return out;
+}
+
+void write_json_string_array(fs::ofstream &out, const std::vector<std::string> &values) {
+    out << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0)
+            out << ", ";
+        out << "\"" << json_escape(values[i]) << "\"";
+    }
+    out << "]";
+}
+
+struct ValidationPreparationSnapshot {
+    std::string source_path;
+    std::string title_id;
+    std::string effective_app_version;
+    std::string expected_update_version;
+    bool inventory_complete = true;
+    bool update_version_matches = true;
+    bool content_validation_pass = true;
+    std::size_t mounted_dlc = 0;
+    std::size_t expected_dlc = 0;
+    std::size_t license_rifs = 0;
+    std::size_t configured_external_license_rifs = 0;
+    std::vector<std::string> mounted_dlc_content_ids;
+    std::vector<std::string> expected_dlc_content_ids;
+    std::vector<std::string> missing_dlc_content_ids;
+    std::vector<std::string> external_license_content_ids;
+    std::vector<std::string> inventory_warnings;
+};
+
+ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, const fs::path &source_path, const std::string &title_id) {
+    ValidationPreparationSnapshot snapshot;
+    snapshot.source_path = fs_utils::path_to_utf8(source_path);
+    snapshot.title_id = title_id;
+
+    const fs::path temp_root = emuenv.cache_path / "pkgplay";
+    std::vector<uint8_t> sfo_bytes;
+    if (fs_utils::read_data(temp_root / "app/sce_sys/param.sfo", sfo_bytes)) {
+        sfo::SfoAppInfo info;
+        sfo::get_param_info(info, sfo_bytes, emuenv.cfg.sys_lang);
+        snapshot.effective_app_version = info.app_version;
+    }
+
+    std::set<std::string> mounted_dlc_ids;
+    boost::system::error_code ec;
+    const fs::path addcont_root = temp_root / "addcont";
+    if (fs::is_directory(addcont_root, ec)) {
+        for (fs::directory_iterator it(addcont_root, ec), end; it != end; it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (fs::is_directory(it->path(), ec))
+                mounted_dlc_ids.insert(fs_utils::path_to_utf8(it->path().filename()));
+        }
+    }
+    snapshot.mounted_dlc_content_ids.assign(mounted_dlc_ids.begin(), mounted_dlc_ids.end());
+    snapshot.mounted_dlc = snapshot.mounted_dlc_content_ids.size();
+
+    ec.clear();
+    const fs::path license_root = emuenv.vita_fs_path / "ux0/license" / title_id;
+    if (fs::is_directory(license_root, ec)) {
+        for (fs::recursive_directory_iterator it(license_root, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (!fs::is_regular_file(it->path(), ec))
+                continue;
+            if (string_utils::tolower(it->path().extension().string()) == ".rif")
+                ++snapshot.license_rifs;
+        }
+    }
+
+    const ValidationContentInventory inventory = inventory_validation_content(emuenv, title_id);
+    snapshot.inventory_complete = inventory.inventory_complete;
+    snapshot.expected_update_version = inventory.selected_update_version;
+    snapshot.update_version_matches = inventory.selected_update_source.empty()
+        || (!inventory.selected_update_version.empty() && snapshot.effective_app_version == inventory.selected_update_version);
+    snapshot.expected_dlc_content_ids = validation_expected_dlc_content_ids(inventory);
+    snapshot.expected_dlc = snapshot.expected_dlc_content_ids.size();
+    snapshot.configured_external_license_rifs = inventory.external_license_content_ids.size();
+    snapshot.external_license_content_ids = inventory.external_license_content_ids;
+    snapshot.inventory_warnings = inventory.warnings;
+
+    for (const auto &content_id : snapshot.expected_dlc_content_ids) {
+        if (!mounted_dlc_ids.contains(content_id))
+            snapshot.missing_dlc_content_ids.push_back(content_id);
+    }
+
+    snapshot.content_validation_pass = snapshot.inventory_complete
+        && snapshot.update_version_matches
+        && snapshot.missing_dlc_content_ids.empty();
+    return snapshot;
+}
+
+void write_validation_result(const fs::path &path, const ValidationPreparationSnapshot &snapshot,
+    bool boot_started, bool frames_observed, bool stable_runtime_complete,
+    int requested_runtime_seconds, int boot_timeout_seconds, int observed_runtime_ms,
+    const std::string &runtime_reason) {
+    boost::system::error_code ec;
+    if (!path.parent_path().empty())
+        fs::create_directories(path.parent_path(), ec);
+
+    fs::ofstream out(path, std::ios::out | std::ios::binary);
+    if (!out) {
+        LOG_ERROR("VALIDATION: could not write result file {}", fs_utils::path_to_utf8(path));
+        return;
+    }
+
+    const bool runtime_pass = boot_started && frames_observed && stable_runtime_complete;
+    const bool pass = snapshot.content_validation_pass && runtime_pass;
+
+    std::string final_reason = runtime_reason;
+    if (pass) {
+        final_reason = "content_verified_booted_and_rendered";
+    } else if (runtime_pass && !snapshot.content_validation_pass) {
+        if (!snapshot.inventory_complete)
+            final_reason = "content_inventory_incomplete";
+        else if (!snapshot.update_version_matches)
+            final_reason = "expected_update_not_effective";
+        else if (!snapshot.missing_dlc_content_ids.empty())
+            final_reason = "expected_dlc_missing";
+        else
+            final_reason = "content_validation_failed";
+    }
+
+    out << "{\n"
+        << "  \"status\": \"" << (pass ? "pass" : "fail") << "\",\n"
+        << "  \"reason\": \"" << json_escape(final_reason) << "\",\n"
+        << "  \"source_path\": \"" << json_escape(snapshot.source_path) << "\",\n"
+        << "  \"title_id\": \"" << json_escape(snapshot.title_id) << "\",\n"
+        << "  \"content_validation_pass\": " << (snapshot.content_validation_pass ? "true" : "false") << ",\n"
+        << "  \"inventory_complete\": " << (snapshot.inventory_complete ? "true" : "false") << ",\n"
+        << "  \"effective_app_version\": \"" << json_escape(snapshot.effective_app_version) << "\",\n"
+        << "  \"expected_update_version\": \"" << json_escape(snapshot.expected_update_version) << "\",\n"
+        << "  \"update_version_matches\": " << (snapshot.update_version_matches ? "true" : "false") << ",\n"
+        << "  \"expected_dlc\": " << snapshot.expected_dlc << ",\n"
+        << "  \"mounted_dlc\": " << snapshot.mounted_dlc << ",\n"
+        << "  \"expected_dlc_content_ids\": ";
+    write_json_string_array(out, snapshot.expected_dlc_content_ids);
+    out << ",\n  \"mounted_dlc_content_ids\": ";
+    write_json_string_array(out, snapshot.mounted_dlc_content_ids);
+    out << ",\n  \"missing_dlc_content_ids\": ";
+    write_json_string_array(out, snapshot.missing_dlc_content_ids);
+    out << ",\n"
+        << "  \"external_license_content_ids\": ";
+    write_json_string_array(out, snapshot.external_license_content_ids);
+    out << ",\n"
+        << "  \"configured_external_license_rifs\": " << snapshot.configured_external_license_rifs << ",\n"
+        << "  \"license_rifs\": " << snapshot.license_rifs << ",\n"
+        << "  \"inventory_warnings\": ";
+    write_json_string_array(out, snapshot.inventory_warnings);
+    out << ",\n"
+        << "  \"boot_started\": " << (boot_started ? "true" : "false") << ",\n"
+        << "  \"frames_observed\": " << (frames_observed ? "true" : "false") << ",\n"
+        << "  \"stable_runtime_complete\": " << (stable_runtime_complete ? "true" : "false") << ",\n"
+        << "  \"requested_runtime_seconds\": " << requested_runtime_seconds << ",\n"
+        << "  \"boot_timeout_seconds\": " << boot_timeout_seconds << ",\n"
+        << "  \"observed_runtime_ms\": " << observed_runtime_ms << "\n"
+        << "}\n";
+    out.close();
+
+    LOG_INFO("VALIDATION: {} [{}] content={} runtime={} result={}", pass ? "PASS" : "FAIL", snapshot.title_id,
+        snapshot.content_validation_pass ? "pass" : "fail", runtime_pass ? "pass" : "fail", fs_utils::path_to_utf8(path));
+}
+
+} // namespace
 
 int main(int argc, char *argv[]) {
 #ifdef __APPLE__
@@ -264,6 +478,19 @@ int main(int argc, char *argv[]) {
         emuenv.cfg.play_pkg_path.reset();
     }
 
+    const bool validation_mode = std::getenv("VITA3K_VALIDATE_GAME") != nullptr;
+    const int validation_runtime_seconds = validation_env_int("VITA3K_VALIDATE_RUNTIME", 10, 1, 600);
+    const int validation_boot_timeout_seconds = validation_env_int("VITA3K_VALIDATE_BOOT_TIMEOUT", 60, 5, 1800);
+    const char *validation_result_env = std::getenv("VITA3K_VALIDATE_RESULT");
+    fs::path validation_result_path;
+    if (validation_result_env && *validation_result_env)
+        validation_result_path = fs_utils::utf8_to_path(validation_result_env);
+    else
+        validation_result_path = emuenv.cache_path / "validation-result.json";
+    ValidationPreparationSnapshot validation_snapshot;
+    const std::string validation_original_user_id = emuenv.cfg.user_id;
+    std::string validation_user_id;
+
     // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
     // ux0/app. A synthetic apps-list entry lets the normal boot path (set_app_info -> load_app)
     // resolve to the mounted bundle; the mount serves app0:/addcont0: reads (see io/bundle.h).
@@ -303,14 +530,38 @@ int main(int argc, char *argv[]) {
     // Play a self-contained NoNpDrm pkg with no permanent install: decrypt to temp, mount, boot;
     // the temp tree is deleted when the game stops (io_deinit).
     if (emuenv.cfg.play_pkg_path.has_value()) {
+        const fs::path source_path = *emuenv.cfg.play_pkg_path;
         std::string play_error;
-        const std::string title_id = mount_pkg_for_play(emuenv, *emuenv.cfg.play_pkg_path, play_error);
+        const std::string title_id = mount_pkg_for_play(emuenv, source_path, play_error);
         if (title_id.empty()) {
-            LOG_CRITICAL("Failed to play pkg {}: {}", emuenv.cfg.play_pkg_path->string(), play_error);
-            return 1;
+            LOG_CRITICAL("Failed to play pkg {}: {}", source_path.string(), play_error);
+            if (validation_mode) {
+                validation_snapshot.source_path = fs_utils::path_to_utf8(source_path);
+                validation_snapshot.inventory_complete = false;
+                validation_snapshot.content_validation_pass = false;
+                write_validation_result(validation_result_path, validation_snapshot, false, false, false,
+                    validation_runtime_seconds, validation_boot_timeout_seconds, 0, "preparation_failed: " + play_error);
+            }
+            return validation_mode ? 2 : 1;
         }
         emuenv.cfg.run_app_path = title_id;
         LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
+        if (validation_mode)
+            validation_snapshot = snapshot_prepared_game(emuenv, source_path, title_id);
+    }
+
+    // Validation boots use an isolated throw-away Vita user. Saves, trophies and play history created
+    // by the short automated boot therefore never touch the user's real profile. The temporary user
+    // is deleted and the original active user restored after the validation event loop exits.
+    if (validation_mode) {
+        validation_user_id = app::create_user(emuenv, "Vita3K Validator");
+        if (validation_user_id.empty() || !app::activate_user(emuenv, validation_user_id)) {
+            write_validation_result(validation_result_path, validation_snapshot, false, false, false,
+                validation_runtime_seconds, validation_boot_timeout_seconds, 0, "could_not_create_isolated_validation_user");
+            return 2;
+        }
+        emuenv.cfg.user_id = validation_user_id;
+        LOG_INFO("VALIDATION: using isolated temporary user [{}]", validation_user_id);
     }
 
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
@@ -319,13 +570,110 @@ int main(int argc, char *argv[]) {
 
     MainWindow mainwindow(emuenv, gui_settings, persistent_settings, admin_priv);
 
+    bool validation_pass = false;
+    if (validation_mode) {
+        LOG_INFO("VALIDATION: armed runtime={}s boot-timeout={}s result={}",
+            validation_runtime_seconds, validation_boot_timeout_seconds, fs_utils::path_to_utf8(validation_result_path));
+
+        const auto validation_started = std::chrono::steady_clock::now();
+        auto first_frame_at = validation_started;
+        auto last_render_activity_at = validation_started;
+        std::size_t last_observed_frame_count = 0;
+        constexpr int max_render_idle_ms = 2000;
+        bool boot_started = false;
+        bool frames_observed = false;
+        bool first_frame_recorded = false;
+
+        auto *validation_timer = new QTimer(&mainwindow);
+        validation_timer->setInterval(250);
+        QObject::connect(validation_timer, &QTimer::timeout, &mainwindow, [&]() {
+            if (QWidget *modal = QApplication::activeModalWidget()) {
+                if (auto *box = qobject_cast<QMessageBox *>(modal)) {
+                    LOG_WARN("VALIDATION: closing modal dialog: {}", box->text().toStdString());
+                    box->done(QMessageBox::Ok);
+                }
+            }
+
+            if (emuenv.main_thread_id != 0)
+                boot_started = true;
+
+            const auto now = std::chrono::steady_clock::now();
+            const std::size_t current_frame_count = emuenv.frame_count;
+            if (current_frame_count < last_observed_frame_count)
+                last_observed_frame_count = 0; // the runtime FPS sampler periodically resets frame_count
+            const bool new_frames_observed = current_frame_count > last_observed_frame_count;
+            last_observed_frame_count = current_frame_count;
+            if (new_frames_observed) {
+                const bool resumed_after_stall = frames_observed
+                    && std::chrono::duration_cast<std::chrono::milliseconds>(now - last_render_activity_at).count() > max_render_idle_ms;
+                last_render_activity_at = now;
+                if (!frames_observed || resumed_after_stall) {
+                    frames_observed = true;
+                    first_frame_recorded = true;
+                    first_frame_at = now;
+                    LOG_INFO("VALIDATION: {} rendered frames for [{}]",
+                        resumed_after_stall ? "resumed" : "first", validation_snapshot.title_id);
+                }
+            }
+
+            const int total_elapsed_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - validation_started).count());
+            const int stable_elapsed_ms = first_frame_recorded
+                ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - first_frame_at).count())
+                : 0;
+            const int render_idle_ms = frames_observed
+                ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last_render_activity_at).count())
+                : total_elapsed_ms;
+
+            // A single rendered frame is not enough. At the end of the requested window, require
+            // evidence that frames were still arriving recently; otherwise keep observing until the
+            // boot timeout in case rendering recovers.
+            const bool rendering_is_current = frames_observed && render_idle_ms <= max_render_idle_ms;
+            const bool stable_runtime_complete = rendering_is_current && stable_elapsed_ms >= validation_runtime_seconds * 1000;
+            const bool timed_out = total_elapsed_ms >= validation_boot_timeout_seconds * 1000;
+            if (!stable_runtime_complete && !timed_out)
+                return;
+
+            const bool runtime_pass = boot_started && frames_observed && stable_runtime_complete;
+            validation_pass = validation_snapshot.content_validation_pass && runtime_pass;
+            std::string reason;
+            if (runtime_pass)
+                reason = "booted_and_sustained_rendering";
+            else if (frames_observed)
+                reason = "rendering_stalled_before_validation_completed";
+            else if (boot_started)
+                reason = "boot_started_but_no_rendered_frames_before_timeout";
+            else
+                reason = "boot_did_not_start_before_timeout";
+
+            write_validation_result(validation_result_path, validation_snapshot, boot_started, frames_observed,
+                stable_runtime_complete, validation_runtime_seconds, validation_boot_timeout_seconds,
+                stable_elapsed_ms, reason);
+
+            validation_timer->stop();
+            QMetaObject::invokeMethod(&mainwindow, "on_stop_triggered", Qt::DirectConnection);
+            QTimer::singleShot(250, &app, &QCoreApplication::quit);
+        });
+        validation_timer->start();
+    }
+
     mainwindow.show();
-    if (mainwindow.prompt_startup_warnings())
+    if (validation_mode || mainwindow.prompt_startup_warnings())
         app.exec();
+
+    if (validation_mode && !validation_user_id.empty()) {
+        app::delete_user(emuenv, validation_user_id);
+        emuenv.cfg.user_id = validation_original_user_id;
+        if (!validation_original_user_id.empty())
+            app::activate_user(emuenv, validation_original_user_id);
+        config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+        LOG_INFO("VALIDATION: removed temporary user and restored [{}]", validation_original_user_id);
+    }
 
 #ifdef _WIN32
     CoUninitialize();
 #endif
 
+    if (validation_mode && !validation_pass)
+        return 2;
     return Success;
 }
