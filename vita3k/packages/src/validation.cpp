@@ -10,6 +10,7 @@
 
 #include <miniz.h>
 
+#include <config/state.h>
 #include <packages/archive_7z.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
