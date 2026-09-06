@@ -273,7 +273,8 @@ int main(int argc, char *argv[]) {
                 fs::remove_all(root_paths.get_cache_path() / "shaders" / *cfg.delete_title_id);
             }
             if (cfg.pup_path.has_value()) {
-                LOG_INFO("Installing firmware file {}", *cfg.pup_path, [](uint32_t progress) {
+                LOG_INFO("Installing firmware file {}", *cfg.pup_path);
+                install_pup(cfg.get_vita_fs_path(), *cfg.pup_path, [](uint32_t progress) {
                     LOG_INFO("Firmware installation progress: {}%", progress);
                 });
             }
