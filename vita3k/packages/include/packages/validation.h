@@ -23,6 +23,10 @@ struct ValidationContentItem {
 struct ValidationContentInventory {
     std::string title_id;
 
+    // False when a source explicitly belonging to this TITLEID (for example PCSE00001.zip) cannot
+    // be inspected. In that case the validator must not claim that all expected content was mounted.
+    bool inventory_complete = true;
+
     // Update PKGs that the normal NoInstall resolver would consider for this TITLEID. If several
     // exist, selected_update_* mirrors the resolver's highest-app_version choice.
     std::vector<ValidationContentItem> update_candidates;
@@ -39,7 +43,8 @@ struct ValidationContentInventory {
     // informative rather than independently fatal: self-contained NoNpDrm content can supply work.bin.
     std::vector<std::string> external_license_content_ids;
 
-    // Non-fatal inventory/read problems. The caller can surface these in the validation report.
+    // Inventory/read problems. The caller surfaces them in the validation report; targeted content
+    // failures also set inventory_complete=false.
     std::vector<std::string> warnings;
 };
 
