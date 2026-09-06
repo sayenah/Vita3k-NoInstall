@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <config/config.h>
 #include <emuenv/state.h>
 
 #include <string>
