@@ -36,6 +36,7 @@
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <packages/validation.h>
 #include <shader/spirv_recompiler.h>
 #include <util/fs.h>
 #include <util/log.h>
@@ -70,6 +71,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <optional>
+#include <set>
 
 namespace {
 
@@ -112,12 +114,32 @@ std::string json_escape(std::string value) {
     return out;
 }
 
+void write_json_string_array(fs::ofstream &out, const std::vector<std::string> &values) {
+    out << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0)
+            out << ", ";
+        out << "\"" << json_escape(values[i]) << "\"";
+    }
+    out << "]";
+}
+
 struct ValidationPreparationSnapshot {
     std::string source_path;
     std::string title_id;
     std::string effective_app_version;
+    std::string expected_update_version;
+    bool inventory_complete = true;
+    bool update_version_match = true;
+    bool content_validation_pass = true;
     std::size_t mounted_dlc = 0;
+    std::size_t expected_dlc = 0;
     std::size_t license_rifs = 0;
+    std::size_t configured_external_license_rifs = 0;
+    std::vector<std::string> mounted_dlc_content_ids;
+    std::vector<std::string> expected_dlc_content_ids;
+    std::vector<std::string> missing_dlc_content_ids;
+    std::vector<std::string> inventory_warnings;
 };
 
 ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, const fs::path &source_path, const std::string &title_id) {
@@ -133,6 +155,7 @@ ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, 
         snapshot.effective_app_version = info.app_version;
     }
 
+    std::set<std::string> mounted_dlc_ids;
     boost::system::error_code ec;
     const fs::path addcont_root = temp_root / "addcont";
     if (fs::is_directory(addcont_root, ec)) {
@@ -142,9 +165,11 @@ ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, 
                 continue;
             }
             if (fs::is_directory(it->path(), ec))
-                ++snapshot.mounted_dlc;
+                mounted_dlc_ids.insert(fs_utils::path_to_utf8(it->path().filename()));
         }
     }
+    snapshot.mounted_dlc_content_ids.assign(mounted_dlc_ids.begin(), mounted_dlc_ids.end());
+    snapshot.mounted_dlc = snapshot.mounted_dlc_content_ids.size();
 
     ec.clear();
     const fs::path license_root = emuenv.vita_fs_path / "ux0/license" / title_id;
@@ -161,13 +186,31 @@ ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, 
         }
     }
 
+    const ValidationContentInventory inventory = inventory_validation_content(emuenv, title_id);
+    snapshot.inventory_complete = inventory.inventory_complete;
+    snapshot.expected_update_version = inventory.selected_update_version;
+    snapshot.update_version_match = inventory.selected_update_source.empty()
+        || (!inventory.selected_update_version.empty() && snapshot.effective_app_version == inventory.selected_update_version);
+    snapshot.expected_dlc_content_ids = validation_expected_dlc_content_ids(inventory);
+    snapshot.expected_dlc = snapshot.expected_dlc_content_ids.size();
+    snapshot.configured_external_license_rifs = inventory.external_license_content_ids.size();
+    snapshot.inventory_warnings = inventory.warnings;
+
+    for (const auto &content_id : snapshot.expected_dlc_content_ids) {
+        if (!mounted_dlc_ids.contains(content_id))
+            snapshot.missing_dlc_content_ids.push_back(content_id);
+    }
+
+    snapshot.content_validation_pass = snapshot.inventory_complete
+        && snapshot.update_version_match
+        && snapshot.missing_dlc_content_ids.empty();
     return snapshot;
 }
 
 void write_validation_result(const fs::path &path, const ValidationPreparationSnapshot &snapshot,
     bool boot_started, bool frames_observed, bool stable_runtime_complete,
     int requested_runtime_seconds, int boot_timeout_seconds, int observed_runtime_ms,
-    const std::string &reason) {
+    const std::string &runtime_reason) {
     boost::system::error_code ec;
     if (!path.parent_path().empty())
         fs::create_directories(path.parent_path(), ec);
@@ -178,15 +221,45 @@ void write_validation_result(const fs::path &path, const ValidationPreparationSn
         return;
     }
 
-    const bool pass = boot_started && frames_observed && stable_runtime_complete;
+    const bool runtime_pass = boot_started && frames_observed && stable_runtime_complete;
+    const bool pass = snapshot.content_validation_pass && runtime_pass;
+
+    std::string final_reason = runtime_reason;
+    if (runtime_pass && !snapshot.content_validation_pass) {
+        if (!snapshot.inventory_complete)
+            final_reason = "expected_content_inventory_incomplete";
+        else if (!snapshot.update_version_match)
+            final_reason = "expected_update_not_effective";
+        else if (!snapshot.missing_dlc_content_ids.empty())
+            final_reason = "expected_dlc_missing";
+        else
+            final_reason = "content_validation_failed";
+    }
+
     out << "{\n"
         << "  \"status\": \"" << (pass ? "pass" : "fail") << "\",\n"
-        << "  \"reason\": \"" << json_escape(reason) << "\",\n"
+        << "  \"reason\": \"" << json_escape(final_reason) << "\",\n"
         << "  \"source_path\": \"" << json_escape(snapshot.source_path) << "\",\n"
         << "  \"title_id\": \"" << json_escape(snapshot.title_id) << "\",\n"
+        << "  \"content_validation_pass\": " << (snapshot.content_validation_pass ? "true" : "false") << ",\n"
+        << "  \"inventory_complete\": " << (snapshot.inventory_complete ? "true" : "false") << ",\n"
         << "  \"effective_app_version\": \"" << json_escape(snapshot.effective_app_version) << "\",\n"
+        << "  \"expected_update_version\": \"" << json_escape(snapshot.expected_update_version) << "\",\n"
+        << "  \"update_version_match\": " << (snapshot.update_version_match ? "true" : "false") << ",\n"
+        << "  \"expected_dlc\": " << snapshot.expected_dlc << ",\n"
         << "  \"mounted_dlc\": " << snapshot.mounted_dlc << ",\n"
+        << "  \"expected_dlc_content_ids\": ";
+    write_json_string_array(out, snapshot.expected_dlc_content_ids);
+    out << ",\n  \"mounted_dlc_content_ids\": ";
+    write_json_string_array(out, snapshot.mounted_dlc_content_ids);
+    out << ",\n  \"missing_dlc_content_ids\": ";
+    write_json_string_array(out, snapshot.missing_dlc_content_ids);
+    out << ",\n"
+        << "  \"configured_external_license_rifs\": " << snapshot.configured_external_license_rifs << ",\n"
         << "  \"license_rifs\": " << snapshot.license_rifs << ",\n"
+        << "  \"inventory_warnings\": ";
+    write_json_string_array(out, snapshot.inventory_warnings);
+    out << ",\n"
         << "  \"boot_started\": " << (boot_started ? "true" : "false") << ",\n"
         << "  \"frames_observed\": " << (frames_observed ? "true" : "false") << ",\n"
         << "  \"stable_runtime_complete\": " << (stable_runtime_complete ? "true" : "false") << ",\n"
@@ -196,7 +269,8 @@ void write_validation_result(const fs::path &path, const ValidationPreparationSn
         << "}\n";
     out.close();
 
-    LOG_INFO("VALIDATION: {} [{}] result={}", pass ? "PASS" : "FAIL", snapshot.title_id, fs_utils::path_to_utf8(path));
+    LOG_INFO("VALIDATION: {} [{}] content={} runtime={} result={}", pass ? "PASS" : "FAIL", snapshot.title_id,
+        snapshot.content_validation_pass ? "pass" : "fail", runtime_pass ? "pass" : "fail", fs_utils::path_to_utf8(path));
 }
 
 } // namespace
@@ -541,9 +615,10 @@ int main(int argc, char *argv[]) {
             if (!stable_runtime_complete && !timed_out)
                 return;
 
-            validation_pass = boot_started && frames_observed && stable_runtime_complete;
+            const bool runtime_pass = boot_started && frames_observed && stable_runtime_complete;
+            validation_pass = validation_snapshot.content_validation_pass && runtime_pass;
             std::string reason;
-            if (validation_pass)
+            if (runtime_pass)
                 reason = "booted_and_sustained_rendering";
             else if (frames_observed)
                 reason = "rendering_stalled_before_validation_completed";
