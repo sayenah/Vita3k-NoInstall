@@ -57,6 +57,41 @@ function Get-SafeStem {
     return $value
 }
 
+function New-FailureRow {
+    param(
+        [Parameter(Mandatory = $true)][string]$GamePath,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [Parameter(Mandatory = $true)][int]$ExitCode
+    )
+
+    return [pscustomobject]@{
+        source_path                      = $GamePath
+        title_id                         = ""
+        status                           = "fail"
+        reason                           = $Reason
+        content_validation_pass          = $false
+        inventory_complete               = $false
+        effective_app_version            = ""
+        expected_update_version          = ""
+        update_version_match             = $false
+        expected_dlc                     = 0
+        mounted_dlc                      = 0
+        expected_dlc_content_ids         = ""
+        mounted_dlc_content_ids          = ""
+        missing_dlc_content_ids          = ""
+        configured_external_license_rifs = 0
+        license_rifs                     = 0
+        inventory_warnings               = ""
+        boot_started                     = $false
+        frames_observed                  = $false
+        stable_runtime_complete          = $false
+        requested_runtime_seconds        = $RuntimeSeconds
+        boot_timeout_seconds             = $BootTimeoutSeconds
+        observed_runtime_ms              = 0
+        process_exit_code                = $ExitCode
+    }
+}
+
 function Read-ValidationResult {
     param(
         [Parameter(Mandatory = $true)][string]$ResultPath,
@@ -65,61 +100,41 @@ function Read-ValidationResult {
     )
 
     if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
-        return [pscustomobject]@{
-            source_path                    = $GamePath
-            title_id                       = ""
-            status                         = "fail"
-            reason                         = "process_exited_without_result"
-            effective_app_version          = ""
-            mounted_dlc                    = 0
-            license_rifs                   = 0
-            boot_started                   = $false
-            frames_observed                = $false
-            stable_runtime_complete        = $false
-            requested_runtime_seconds      = $RuntimeSeconds
-            boot_timeout_seconds           = $BootTimeoutSeconds
-            observed_runtime_ms             = 0
-            process_exit_code              = $ExitCode
-        }
+        return New-FailureRow -GamePath $GamePath -Reason "process_exited_without_result" -ExitCode $ExitCode
     }
 
     try {
         $data = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
     }
     catch {
-        return [pscustomobject]@{
-            source_path                    = $GamePath
-            title_id                       = ""
-            status                         = "fail"
-            reason                         = "invalid_result_json: $($_.Exception.Message)"
-            effective_app_version          = ""
-            mounted_dlc                    = 0
-            license_rifs                   = 0
-            boot_started                   = $false
-            frames_observed                = $false
-            stable_runtime_complete        = $false
-            requested_runtime_seconds      = $RuntimeSeconds
-            boot_timeout_seconds           = $BootTimeoutSeconds
-            observed_runtime_ms             = 0
-            process_exit_code              = $ExitCode
-        }
+        return New-FailureRow -GamePath $GamePath -Reason "invalid_result_json: $($_.Exception.Message)" -ExitCode $ExitCode
     }
 
     return [pscustomobject]@{
-        source_path                    = [string]$data.source_path
-        title_id                       = [string]$data.title_id
-        status                         = [string]$data.status
-        reason                         = [string]$data.reason
-        effective_app_version          = [string]$data.effective_app_version
-        mounted_dlc                    = [int]$data.mounted_dlc
-        license_rifs                   = [int]$data.license_rifs
-        boot_started                   = [bool]$data.boot_started
-        frames_observed                = [bool]$data.frames_observed
-        stable_runtime_complete        = [bool]$data.stable_runtime_complete
-        requested_runtime_seconds      = [int]$data.requested_runtime_seconds
-        boot_timeout_seconds           = [int]$data.boot_timeout_seconds
-        observed_runtime_ms             = [int]$data.observed_runtime_ms
-        process_exit_code              = $ExitCode
+        source_path                      = [string]$data.source_path
+        title_id                         = [string]$data.title_id
+        status                           = [string]$data.status
+        reason                           = [string]$data.reason
+        content_validation_pass          = [bool]$data.content_validation_pass
+        inventory_complete               = [bool]$data.inventory_complete
+        effective_app_version            = [string]$data.effective_app_version
+        expected_update_version          = [string]$data.expected_update_version
+        update_version_match             = [bool]$data.update_version_match
+        expected_dlc                     = [int]$data.expected_dlc
+        mounted_dlc                      = [int]$data.mounted_dlc
+        expected_dlc_content_ids         = (@($data.expected_dlc_content_ids) -join ';')
+        mounted_dlc_content_ids          = (@($data.mounted_dlc_content_ids) -join ';')
+        missing_dlc_content_ids          = (@($data.missing_dlc_content_ids) -join ';')
+        configured_external_license_rifs = [int]$data.configured_external_license_rifs
+        license_rifs                     = [int]$data.license_rifs
+        inventory_warnings               = (@($data.inventory_warnings) -join ' | ')
+        boot_started                     = [bool]$data.boot_started
+        frames_observed                  = [bool]$data.frames_observed
+        stable_runtime_complete          = [bool]$data.stable_runtime_complete
+        requested_runtime_seconds        = [int]$data.requested_runtime_seconds
+        boot_timeout_seconds             = [int]$data.boot_timeout_seconds
+        observed_runtime_ms              = [int]$data.observed_runtime_ms
+        process_exit_code                = $ExitCode
     }
 }
 
@@ -192,24 +207,13 @@ for ($index = 0; $index -lt $games.Count; $index++) {
     Write-Host ("[{0} / {1}] {2}" -f ($index + 1), $games.Count, $game.FullName)
 
     if (-not $Fresh -and (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        $existingExitCode = 2
         try {
             $existingRaw = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-            $existing = [pscustomobject]@{
-                source_path                    = [string]$existingRaw.source_path
-                title_id                       = [string]$existingRaw.title_id
-                status                         = [string]$existingRaw.status
-                reason                         = [string]$existingRaw.reason
-                effective_app_version          = [string]$existingRaw.effective_app_version
-                mounted_dlc                    = [int]$existingRaw.mounted_dlc
-                license_rifs                   = [int]$existingRaw.license_rifs
-                boot_started                   = [bool]$existingRaw.boot_started
-                frames_observed                = [bool]$existingRaw.frames_observed
-                stable_runtime_complete        = [bool]$existingRaw.stable_runtime_complete
-                requested_runtime_seconds      = [int]$existingRaw.requested_runtime_seconds
-                boot_timeout_seconds           = [int]$existingRaw.boot_timeout_seconds
-                observed_runtime_ms             = [int]$existingRaw.observed_runtime_ms
-                process_exit_code              = if ($existingRaw.status -eq 'pass') { 0 } else { 2 }
+            if ($existingRaw.status -eq 'pass') {
+                $existingExitCode = 0
             }
+            $existing = Read-ValidationResult -ResultPath $resultPath -GamePath $game.FullName -ExitCode $existingExitCode
             $results.Add($existing)
             if ($existing.status -eq 'pass') { $passCount++ } else { $failCount++ }
             $resumedCount++
@@ -256,43 +260,16 @@ for ($index = 0; $index -lt $games.Count; $index++) {
 
         $exitCode = $process.ExitCode
         if ($timedOut -and -not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-            [pscustomobject]@{
-                status                          = 'fail'
-                reason                          = 'hard_process_timeout'
-                source_path                     = $game.FullName
-                title_id                        = ''
-                effective_app_version            = ''
-                mounted_dlc                     = 0
-                license_rifs                    = 0
-                boot_started                    = $false
-                frames_observed                 = $false
-                stable_runtime_complete         = $false
-                requested_runtime_seconds       = $RuntimeSeconds
-                boot_timeout_seconds             = $BootTimeoutSeconds
-                observed_runtime_ms              = 0
-            } | ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
+            $timeoutRow = New-FailureRow -GamePath $game.FullName -Reason "hard_process_timeout" -ExitCode $exitCode
+            $timeoutRow | Select-Object -ExcludeProperty process_exit_code |
+                ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
         }
 
         $row = Read-ValidationResult -ResultPath $resultPath -GamePath $game.FullName -ExitCode $exitCode
     }
     catch {
-        $row = [pscustomobject]@{
-            source_path                    = $game.FullName
-            title_id                       = ""
-            status                         = "fail"
-            reason                         = "launcher_exception: $($_.Exception.Message)"
-            effective_app_version          = ""
-            mounted_dlc                    = 0
-            license_rifs                   = 0
-            boot_started                   = $false
-            frames_observed                = $false
-            stable_runtime_complete        = $false
-            requested_runtime_seconds      = $RuntimeSeconds
-            boot_timeout_seconds           = $BootTimeoutSeconds
-            observed_runtime_ms             = 0
-            process_exit_code              = -1
-        }
-        $row | Select-Object status, reason, source_path, title_id, effective_app_version, mounted_dlc, license_rifs, boot_started, frames_observed, stable_runtime_complete, requested_runtime_seconds, boot_timeout_seconds, observed_runtime_ms |
+        $row = New-FailureRow -GamePath $game.FullName -Reason "launcher_exception: $($_.Exception.Message)" -ExitCode -1
+        $row | Select-Object -ExcludeProperty process_exit_code |
             ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
     }
     finally {
@@ -304,11 +281,14 @@ for ($index = 0; $index -lt $games.Count; $index++) {
     $results.Add($row)
     if ($row.status -eq 'pass') {
         $passCount++
-        Write-Host "PASS: $($row.title_id) | app $($row.effective_app_version) | DLC mounted $($row.mounted_dlc) | RIFs $($row.license_rifs)"
+        Write-Host "PASS: $($row.title_id) | app $($row.effective_app_version) | DLC $($row.mounted_dlc)/$($row.expected_dlc) | RIFs $($row.license_rifs)"
     }
     else {
         $failCount++
         Write-Warning "FAIL: $($row.title_id) | $($row.reason)"
+        if (-not [string]::IsNullOrWhiteSpace($row.missing_dlc_content_ids)) {
+            Write-Warning "Missing DLC: $($row.missing_dlc_content_ids)"
+        }
     }
 
     # Rebuild the CSV after every title. If the host or emulator crashes later, all completed results
