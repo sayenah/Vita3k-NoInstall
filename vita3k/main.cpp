@@ -407,6 +407,8 @@ int main(int argc, char *argv[]) {
     else
         validation_result_path = emuenv.cache_path / "validation-result.json";
     ValidationPreparationSnapshot validation_snapshot;
+    const std::string validation_original_user_id = emuenv.cfg.user_id;
+    std::string validation_user_id;
 
     // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
     // ux0/app. A synthetic apps-list entry lets the normal boot path (set_app_info -> load_app)
@@ -463,6 +465,20 @@ int main(int argc, char *argv[]) {
         LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
         if (validation_mode)
             validation_snapshot = snapshot_prepared_game(emuenv, source_path, title_id);
+    }
+
+    // Validation boots use an isolated throw-away Vita user. Saves, trophies and play history created
+    // by the short automated boot therefore never touch the user's real profile. The temporary user
+    // is deleted and the original active user restored after the validation event loop exits.
+    if (validation_mode) {
+        validation_user_id = app::create_user(emuenv, "Vita3K Validator");
+        if (validation_user_id.empty() || !app::activate_user(emuenv, validation_user_id)) {
+            write_validation_result(validation_result_path, validation_snapshot, false, false, false,
+                validation_runtime_seconds, validation_boot_timeout_seconds, 0, "could_not_create_isolated_validation_user");
+            return 1;
+        }
+        emuenv.cfg.user_id = validation_user_id;
+        LOG_INFO("VALIDATION: using isolated temporary user [{}]", validation_user_id);
     }
 
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
@@ -532,6 +548,15 @@ int main(int argc, char *argv[]) {
     mainwindow.show();
     if (validation_mode || mainwindow.prompt_startup_warnings())
         app.exec();
+
+    if (validation_mode && !validation_user_id.empty()) {
+        app::delete_user(emuenv, validation_user_id);
+        emuenv.cfg.user_id = validation_original_user_id;
+        if (!validation_original_user_id.empty())
+            app::activate_user(emuenv, validation_original_user_id);
+        config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+        LOG_INFO("VALIDATION: removed temporary user and restored [{}]", validation_original_user_id);
+    }
 
 #ifdef _WIN32
     CoUninitialize();
