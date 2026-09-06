@@ -53,5 +53,6 @@ struct ValidationContentInventory {
 // what the launch path produced against what this scanner says should have been consumed.
 ValidationContentInventory inventory_validation_content(const EmuEnvState &emuenv, const std::string &title_id);
 
-// Unique expected DLC content ids from both package-backed and already-decrypted DLC sources.
+// Unique addcont directory ids expected from both package-backed and already-decrypted DLC sources.
+// Package content IDs are normalized the same way install_pkg names mounted DLC directories.
 std::vector<std::string> validation_expected_dlc_content_ids(const ValidationContentInventory &inventory);

@@ -33,8 +33,8 @@ For a TITLEID it mirrors these existing NoInstall layouts:
 - Updates: `<TITLEID>/`, `<TITLEID>.zip`, `<TITLEID>.7z`, or loose matching `.pkg` files. Only update
   category `gp` is expected when the package SFO is readable; the highest `app_version` is selected.
 - DLC: `<TITLEID>/`, `<TITLEID>.zip`, `<TITLEID>.7z`, loose matching `.pkg` files, and already-decrypted
-  `addcont` trees. Package content IDs and decrypted addcont directory names become the expected DLC
-  set.
+  `addcont` trees. Package content IDs are normalized to the addcont directory suffix used by
+  `install_pkg`; those IDs and decrypted addcont directory names become the expected DLC set.
 - Licenses: `<TITLEID>/*.rif` and `license.zip` are inventoried for reporting. External RIF content IDs
   are not independently fatal because self-contained NoNpDrm content can supply `work.bin` instead.
 

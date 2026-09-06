@@ -385,8 +385,11 @@ ValidationContentInventory inventory_validation_content(const EmuEnvState &emuen
 std::vector<std::string> validation_expected_dlc_content_ids(const ValidationContentInventory &inventory) {
     std::set<std::string> ids(inventory.decrypted_dlc_content_ids.begin(), inventory.decrypted_dlc_content_ids.end());
     for (const auto &item : inventory.dlc_packages) {
-        if (!item.content_id.empty())
-            ids.insert(item.content_id);
+        if (!item.content_id.empty()) {
+            // install_pkg uses the content-specific suffix as the addcont directory name. Compare
+            // against that mounted identity while retaining the full PSN content ID in dlc_packages.
+            ids.insert(item.content_id.size() > 20 ? item.content_id.substr(20) : item.content_id);
+        }
     }
     return { ids.begin(), ids.end() };
 }
