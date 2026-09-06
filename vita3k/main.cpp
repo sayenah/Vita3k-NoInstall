@@ -273,8 +273,7 @@ int main(int argc, char *argv[]) {
                 fs::remove_all(root_paths.get_cache_path() / "shaders" / *cfg.delete_title_id);
             }
             if (cfg.pup_path.has_value()) {
-                LOG_INFO("Installing firmware file {}", *cfg.pup_path);
-                install_pup(cfg.get_vita_fs_path(), *cfg.pup_path, [](uint32_t progress) {
+                LOG_INFO("Installing firmware file {}", *cfg.pup_path, [](uint32_t progress) {
                     LOG_INFO("Firmware installation progress: {}%", progress);
                 });
             }
@@ -494,6 +493,7 @@ int main(int argc, char *argv[]) {
 
         const auto validation_started = std::chrono::steady_clock::now();
         auto first_frame_at = validation_started;
+        auto last_render_activity_at = validation_started;
         bool boot_started = false;
         bool frames_observed = false;
         bool first_frame_recorded = false;
@@ -511,28 +511,45 @@ int main(int argc, char *argv[]) {
             if (emuenv.main_thread_id != 0)
                 boot_started = true;
 
-            if (!frames_observed && (emuenv.frame_count > 0 || emuenv.fps > 0)) {
-                frames_observed = true;
-                first_frame_recorded = true;
-                first_frame_at = std::chrono::steady_clock::now();
-                LOG_INFO("VALIDATION: first rendered frames observed for [{}]", validation_snapshot.title_id);
+            const auto now = std::chrono::steady_clock::now();
+            if (emuenv.frame_count > 0) {
+                last_render_activity_at = now;
+                if (!frames_observed) {
+                    frames_observed = true;
+                    first_frame_recorded = true;
+                    first_frame_at = now;
+                    LOG_INFO("VALIDATION: first rendered frames observed for [{}]", validation_snapshot.title_id);
+                }
             }
 
-            const auto now = std::chrono::steady_clock::now();
             const int total_elapsed_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - validation_started).count());
             const int stable_elapsed_ms = first_frame_recorded
                 ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - first_frame_at).count())
                 : 0;
+            const int render_idle_ms = frames_observed
+                ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last_render_activity_at).count())
+                : total_elapsed_ms;
 
-            const bool stable_runtime_complete = frames_observed && stable_elapsed_ms >= validation_runtime_seconds * 1000;
+            // A single rendered frame is not enough. At the end of the requested window, require
+            // evidence that frames were still arriving recently; otherwise keep observing until the
+            // boot timeout in case rendering recovers.
+            constexpr int max_render_idle_ms = 2000;
+            const bool rendering_is_current = frames_observed && render_idle_ms <= max_render_idle_ms;
+            const bool stable_runtime_complete = rendering_is_current && stable_elapsed_ms >= validation_runtime_seconds * 1000;
             const bool timed_out = total_elapsed_ms >= validation_boot_timeout_seconds * 1000;
             if (!stable_runtime_complete && !timed_out)
                 return;
 
             validation_pass = boot_started && frames_observed && stable_runtime_complete;
-            const std::string reason = validation_pass
-                ? "booted_and_rendered"
-                : (boot_started ? "boot_started_but_no_stable_rendering_before_timeout" : "boot_did_not_start_before_timeout");
+            std::string reason;
+            if (validation_pass)
+                reason = "booted_and_sustained_rendering";
+            else if (frames_observed)
+                reason = "rendering_stalled_before_validation_completed";
+            else if (boot_started)
+                reason = "boot_started_but_no_rendered_frames_before_timeout";
+            else
+                reason = "boot_did_not_start_before_timeout";
 
             write_validation_result(validation_result_path, validation_snapshot, boot_started, frames_observed,
                 stable_runtime_complete, validation_runtime_seconds, validation_boot_timeout_seconds,
