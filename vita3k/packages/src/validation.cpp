@@ -157,7 +157,7 @@ void collect_decrypted_addcont_ids(const fs::path &root, const std::string &titl
 
 void collect_pkg_candidates(const fs::path &root, const fs::path &source_override, const std::string &title_id,
     int sys_lang, const std::string &wanted_category, std::set<std::string> &seen_paths,
-    std::vector<ValidationContentItem> &out, std::vector<std::string> &warnings) {
+    std::vector<ValidationContentItem> &out, std::vector<std::string> &warnings, bool *inventory_complete) {
     boost::system::error_code ec;
     if (!fs::is_directory(root, ec))
         return;
@@ -179,6 +179,8 @@ void collect_pkg_candidates(const fs::path &root, const fs::path &source_overrid
         const PkgMetadata meta = inspect_pkg(path, sys_lang);
         if (!meta.header_ok) {
             warnings.push_back("Unreadable PKG header: " + path_key);
+            if (inventory_complete)
+                *inventory_complete = false;
             continue;
         }
         if (meta.title_id != title_id)
@@ -203,7 +205,7 @@ void collect_pkg_candidates(const fs::path &root, const fs::path &source_overrid
 
 void inventory_container(const fs::path &archive_path, const fs::path &scratch, const std::string &title_id,
     int sys_lang, const std::string &category, std::vector<ValidationContentItem> &pkg_out,
-    std::set<std::string> *decrypted_dlc_ids, std::vector<std::string> &warnings) {
+    std::set<std::string> *decrypted_dlc_ids, std::vector<std::string> &warnings, bool &inventory_complete) {
     boost::system::error_code ec;
     fs::remove_all(scratch, ec);
     fs::create_directories(scratch, ec);
@@ -216,12 +218,13 @@ void inventory_container(const fs::path &archive_path, const fs::path &scratch, 
 
     if (!ok) {
         warnings.push_back("Could not inspect " + fs_utils::path_to_utf8(archive_path) + ": " + error);
+        inventory_complete = false;
         fs::remove_all(scratch, ec);
         return;
     }
 
     std::set<std::string> seen;
-    collect_pkg_candidates(scratch, archive_path, title_id, sys_lang, category, seen, pkg_out, warnings);
+    collect_pkg_candidates(scratch, archive_path, title_id, sys_lang, category, seen, pkg_out, warnings, &inventory_complete);
     if (decrypted_dlc_ids)
         collect_decrypted_addcont_ids(scratch, title_id, *decrypted_dlc_ids);
 
@@ -282,18 +285,21 @@ ValidationContentInventory inventory_validation_content(const EmuEnvState &emuen
         if (fs::is_directory(root, ec)) {
             std::set<std::string> seen;
             collect_pkg_candidates(root / title_id, {}, title_id, emuenv.cfg.sys_lang, "gp", seen,
-                inventory.update_candidates, inventory.warnings);
+                inventory.update_candidates, inventory.warnings, &inventory.inventory_complete);
 
             for (const char *ext : { ".zip", ".7z" }) {
                 const fs::path archive = root / (title_id + ext);
                 if (fs::is_regular_file(archive, ec)) {
                     inventory_container(archive, scratch_root / (std::string("updates") + ext), title_id,
-                        emuenv.cfg.sys_lang, "gp", inventory.update_candidates, nullptr, inventory.warnings);
+                        emuenv.cfg.sys_lang, "gp", inventory.update_candidates, nullptr, inventory.warnings,
+                        inventory.inventory_complete);
                 }
             }
 
+            // Loose packages outside the targeted title directory cannot be assigned to this game if
+            // their header is unreadable, so those are warnings but do not make this title incomplete.
             collect_pkg_candidates(root, {}, title_id, emuenv.cfg.sys_lang, "gp", seen,
-                inventory.update_candidates, inventory.warnings);
+                inventory.update_candidates, inventory.warnings, nullptr);
         }
     }
 
@@ -317,19 +323,20 @@ ValidationContentInventory inventory_validation_content(const EmuEnvState &emuen
             std::set<std::string> seen;
             const fs::path title_dir = root / title_id;
             collect_pkg_candidates(title_dir, {}, title_id, emuenv.cfg.sys_lang, "ac", seen,
-                inventory.dlc_packages, inventory.warnings);
+                inventory.dlc_packages, inventory.warnings, &inventory.inventory_complete);
             collect_decrypted_addcont_ids(title_dir, title_id, decrypted_dlc_ids);
 
             for (const char *ext : { ".zip", ".7z" }) {
                 const fs::path archive = root / (title_id + ext);
                 if (fs::is_regular_file(archive, ec)) {
                     inventory_container(archive, scratch_root / (std::string("dlc") + ext), title_id,
-                        emuenv.cfg.sys_lang, "ac", inventory.dlc_packages, &decrypted_dlc_ids, inventory.warnings);
+                        emuenv.cfg.sys_lang, "ac", inventory.dlc_packages, &decrypted_dlc_ids, inventory.warnings,
+                        inventory.inventory_complete);
                 }
             }
 
             collect_pkg_candidates(root, {}, title_id, emuenv.cfg.sys_lang, "ac", seen,
-                inventory.dlc_packages, inventory.warnings);
+                inventory.dlc_packages, inventory.warnings, nullptr);
         }
     }
     inventory.decrypted_dlc_content_ids.assign(decrypted_dlc_ids.begin(), decrypted_dlc_ids.end());
