@@ -35,8 +35,8 @@ For a TITLEID it mirrors these existing NoInstall layouts:
 - DLC: `<TITLEID>/`, `<TITLEID>.zip`, `<TITLEID>.7z`, loose matching `.pkg` files, and already-decrypted
   `addcont` trees. Package content IDs and decrypted addcont directory names become the expected DLC
   set.
-- Licenses: `<TITLEID>/*.rif` and `license.zip` are inventoried for reporting. External RIF count is not
-  independently fatal because self-contained NoNpDrm content can supply `work.bin` instead.
+- Licenses: `<TITLEID>/*.rif` and `license.zip` are inventoried for reporting. External RIF content IDs
+  are not independently fatal because self-contained NoNpDrm content can supply `work.bin` instead.
 
 If a source explicitly named for the title (for example `PCSE00001.zip`) cannot be inspected, the
 inventory is marked incomplete and the title cannot receive PASS. Unreadable unrelated loose packages
@@ -51,14 +51,14 @@ Each game result records at least:
 - content-validation status and inventory completeness;
 - effective and expected update versions, plus whether they match;
 - expected, mounted, and missing DLC content IDs;
-- configured external RIF count and RIF count visible to Vita3K for the title;
+- configured external RIF content IDs and RIF count visible to Vita3K for the title;
 - inventory warnings;
 - whether Vita execution started;
 - whether rendered frames were observed;
 - whether the stable-rendering window completed;
 - runtime and timeout settings.
 
-Typical failure reasons include `preparation_failed`, `expected_content_inventory_incomplete`,
+Typical failure reasons include `preparation_failed`, `content_inventory_incomplete`,
 `expected_update_not_effective`, `expected_dlc_missing`, `boot_did_not_start_before_timeout`,
 `boot_started_but_no_rendered_frames_before_timeout`, and
 `rendering_stalled_before_validation_completed`.

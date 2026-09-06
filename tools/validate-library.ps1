@@ -73,12 +73,13 @@ function New-FailureRow {
         inventory_complete               = $false
         effective_app_version            = ""
         expected_update_version          = ""
-        update_version_match             = $false
+        update_version_matches           = $false
         expected_dlc                     = 0
         mounted_dlc                      = 0
         expected_dlc_content_ids         = ""
         mounted_dlc_content_ids          = ""
         missing_dlc_content_ids          = ""
+        external_license_content_ids     = ""
         configured_external_license_rifs = 0
         license_rifs                     = 0
         inventory_warnings               = ""
@@ -110,6 +111,14 @@ function Read-ValidationResult {
         return New-FailureRow -GamePath $GamePath -Reason "invalid_result_json: $($_.Exception.Message)" -ExitCode $ExitCode
     }
 
+    $updateVersionMatches = if ($null -ne $data.PSObject.Properties['update_version_matches']) {
+        [bool]$data.update_version_matches
+    }
+    else {
+        # Preserve resumability for JSON written by validator builds before this field was pluralized.
+        [bool]$data.update_version_match
+    }
+
     return [pscustomobject]@{
         source_path                      = [string]$data.source_path
         title_id                         = [string]$data.title_id
@@ -119,12 +128,13 @@ function Read-ValidationResult {
         inventory_complete               = [bool]$data.inventory_complete
         effective_app_version            = [string]$data.effective_app_version
         expected_update_version          = [string]$data.expected_update_version
-        update_version_match             = [bool]$data.update_version_match
+        update_version_matches           = $updateVersionMatches
         expected_dlc                     = [int]$data.expected_dlc
         mounted_dlc                      = [int]$data.mounted_dlc
         expected_dlc_content_ids         = (@($data.expected_dlc_content_ids) -join ';')
         mounted_dlc_content_ids          = (@($data.mounted_dlc_content_ids) -join ';')
         missing_dlc_content_ids          = (@($data.missing_dlc_content_ids) -join ';')
+        external_license_content_ids     = (@($data.external_license_content_ids) -join ';')
         configured_external_license_rifs = [int]$data.configured_external_license_rifs
         license_rifs                     = [int]$data.license_rifs
         inventory_warnings               = (@($data.inventory_warnings) -join ' | ')
@@ -218,6 +228,7 @@ for ($index = 0; $index -lt $games.Count; $index++) {
             if ($existing.status -eq 'pass') { $passCount++ } else { $failCount++ }
             $resumedCount++
             Write-Host "RESUME: existing result = $($existing.status.ToUpperInvariant()) ($($existing.reason))"
+            $results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
             continue
         }
         catch {
@@ -266,6 +277,10 @@ for ($index = 0; $index -lt $games.Count; $index++) {
         }
 
         $row = Read-ValidationResult -ResultPath $resultPath -GamePath $game.FullName -ExitCode $exitCode
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            $row | Select-Object -ExcludeProperty process_exit_code |
+                ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
+        }
     }
     catch {
         $row = New-FailureRow -GamePath $game.FullName -Reason "launcher_exception: $($_.Exception.Message)" -ExitCode -1

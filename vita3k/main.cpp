@@ -130,7 +130,7 @@ struct ValidationPreparationSnapshot {
     std::string effective_app_version;
     std::string expected_update_version;
     bool inventory_complete = true;
-    bool update_version_match = true;
+    bool update_version_matches = true;
     bool content_validation_pass = true;
     std::size_t mounted_dlc = 0;
     std::size_t expected_dlc = 0;
@@ -139,6 +139,7 @@ struct ValidationPreparationSnapshot {
     std::vector<std::string> mounted_dlc_content_ids;
     std::vector<std::string> expected_dlc_content_ids;
     std::vector<std::string> missing_dlc_content_ids;
+    std::vector<std::string> external_license_content_ids;
     std::vector<std::string> inventory_warnings;
 };
 
@@ -189,11 +190,12 @@ ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, 
     const ValidationContentInventory inventory = inventory_validation_content(emuenv, title_id);
     snapshot.inventory_complete = inventory.inventory_complete;
     snapshot.expected_update_version = inventory.selected_update_version;
-    snapshot.update_version_match = inventory.selected_update_source.empty()
+    snapshot.update_version_matches = inventory.selected_update_source.empty()
         || (!inventory.selected_update_version.empty() && snapshot.effective_app_version == inventory.selected_update_version);
     snapshot.expected_dlc_content_ids = validation_expected_dlc_content_ids(inventory);
     snapshot.expected_dlc = snapshot.expected_dlc_content_ids.size();
     snapshot.configured_external_license_rifs = inventory.external_license_content_ids.size();
+    snapshot.external_license_content_ids = inventory.external_license_content_ids;
     snapshot.inventory_warnings = inventory.warnings;
 
     for (const auto &content_id : snapshot.expected_dlc_content_ids) {
@@ -202,7 +204,7 @@ ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, 
     }
 
     snapshot.content_validation_pass = snapshot.inventory_complete
-        && snapshot.update_version_match
+        && snapshot.update_version_matches
         && snapshot.missing_dlc_content_ids.empty();
     return snapshot;
 }
@@ -225,10 +227,12 @@ void write_validation_result(const fs::path &path, const ValidationPreparationSn
     const bool pass = snapshot.content_validation_pass && runtime_pass;
 
     std::string final_reason = runtime_reason;
-    if (runtime_pass && !snapshot.content_validation_pass) {
+    if (pass) {
+        final_reason = "content_verified_booted_and_rendered";
+    } else if (runtime_pass && !snapshot.content_validation_pass) {
         if (!snapshot.inventory_complete)
-            final_reason = "expected_content_inventory_incomplete";
-        else if (!snapshot.update_version_match)
+            final_reason = "content_inventory_incomplete";
+        else if (!snapshot.update_version_matches)
             final_reason = "expected_update_not_effective";
         else if (!snapshot.missing_dlc_content_ids.empty())
             final_reason = "expected_dlc_missing";
@@ -245,7 +249,7 @@ void write_validation_result(const fs::path &path, const ValidationPreparationSn
         << "  \"inventory_complete\": " << (snapshot.inventory_complete ? "true" : "false") << ",\n"
         << "  \"effective_app_version\": \"" << json_escape(snapshot.effective_app_version) << "\",\n"
         << "  \"expected_update_version\": \"" << json_escape(snapshot.expected_update_version) << "\",\n"
-        << "  \"update_version_match\": " << (snapshot.update_version_match ? "true" : "false") << ",\n"
+        << "  \"update_version_matches\": " << (snapshot.update_version_matches ? "true" : "false") << ",\n"
         << "  \"expected_dlc\": " << snapshot.expected_dlc << ",\n"
         << "  \"mounted_dlc\": " << snapshot.mounted_dlc << ",\n"
         << "  \"expected_dlc_content_ids\": ";
@@ -254,6 +258,9 @@ void write_validation_result(const fs::path &path, const ValidationPreparationSn
     write_json_string_array(out, snapshot.mounted_dlc_content_ids);
     out << ",\n  \"missing_dlc_content_ids\": ";
     write_json_string_array(out, snapshot.missing_dlc_content_ids);
+    out << ",\n"
+        << "  \"external_license_content_ids\": ";
+    write_json_string_array(out, snapshot.external_license_content_ids);
     out << ",\n"
         << "  \"configured_external_license_rifs\": " << snapshot.configured_external_license_rifs << ",\n"
         << "  \"license_rifs\": " << snapshot.license_rifs << ",\n"
@@ -530,10 +537,12 @@ int main(int argc, char *argv[]) {
             LOG_CRITICAL("Failed to play pkg {}: {}", source_path.string(), play_error);
             if (validation_mode) {
                 validation_snapshot.source_path = fs_utils::path_to_utf8(source_path);
+                validation_snapshot.inventory_complete = false;
+                validation_snapshot.content_validation_pass = false;
                 write_validation_result(validation_result_path, validation_snapshot, false, false, false,
                     validation_runtime_seconds, validation_boot_timeout_seconds, 0, "preparation_failed: " + play_error);
             }
-            return 1;
+            return validation_mode ? 2 : 1;
         }
         emuenv.cfg.run_app_path = title_id;
         LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
@@ -549,7 +558,7 @@ int main(int argc, char *argv[]) {
         if (validation_user_id.empty() || !app::activate_user(emuenv, validation_user_id)) {
             write_validation_result(validation_result_path, validation_snapshot, false, false, false,
                 validation_runtime_seconds, validation_boot_timeout_seconds, 0, "could_not_create_isolated_validation_user");
-            return 1;
+            return 2;
         }
         emuenv.cfg.user_id = validation_user_id;
         LOG_INFO("VALIDATION: using isolated temporary user [{}]", validation_user_id);
@@ -569,6 +578,8 @@ int main(int argc, char *argv[]) {
         const auto validation_started = std::chrono::steady_clock::now();
         auto first_frame_at = validation_started;
         auto last_render_activity_at = validation_started;
+        std::size_t last_observed_frame_count = 0;
+        constexpr int max_render_idle_ms = 2000;
         bool boot_started = false;
         bool frames_observed = false;
         bool first_frame_recorded = false;
@@ -587,13 +598,21 @@ int main(int argc, char *argv[]) {
                 boot_started = true;
 
             const auto now = std::chrono::steady_clock::now();
-            if (emuenv.frame_count > 0) {
+            const std::size_t current_frame_count = emuenv.frame_count;
+            if (current_frame_count < last_observed_frame_count)
+                last_observed_frame_count = 0; // the runtime FPS sampler periodically resets frame_count
+            const bool new_frames_observed = current_frame_count > last_observed_frame_count;
+            last_observed_frame_count = current_frame_count;
+            if (new_frames_observed) {
+                const bool resumed_after_stall = frames_observed
+                    && std::chrono::duration_cast<std::chrono::milliseconds>(now - last_render_activity_at).count() > max_render_idle_ms;
                 last_render_activity_at = now;
-                if (!frames_observed) {
+                if (!frames_observed || resumed_after_stall) {
                     frames_observed = true;
                     first_frame_recorded = true;
                     first_frame_at = now;
-                    LOG_INFO("VALIDATION: first rendered frames observed for [{}]", validation_snapshot.title_id);
+                    LOG_INFO("VALIDATION: {} rendered frames for [{}]",
+                        resumed_after_stall ? "resumed" : "first", validation_snapshot.title_id);
                 }
             }
 
@@ -608,7 +627,6 @@ int main(int argc, char *argv[]) {
             // A single rendered frame is not enough. At the end of the requested window, require
             // evidence that frames were still arriving recently; otherwise keep observing until the
             // boot timeout in case rendering recovers.
-            constexpr int max_render_idle_ms = 2000;
             const bool rendering_is_current = frames_observed && render_idle_ms <= max_render_idle_ms;
             const bool stable_runtime_complete = rendering_is_current && stable_elapsed_ms >= validation_runtime_seconds * 1000;
             const bool timed_out = total_elapsed_ms >= validation_boot_timeout_seconds * 1000;
