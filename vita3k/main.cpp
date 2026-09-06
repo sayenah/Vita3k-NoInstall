@@ -43,6 +43,8 @@
 
 #include <QApplication>
 #include <QMessageBox>
+#include <QMetaObject>
+#include <QTimer>
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -65,8 +67,139 @@
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_main.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <optional>
+
+namespace {
+
+int validation_env_int(const char *name, int fallback, int minimum, int maximum) {
+    const char *value = std::getenv(name);
+    if (!value || !*value)
+        return fallback;
+
+    const int parsed = std::atoi(value);
+    if (parsed < minimum || parsed > maximum)
+        return fallback;
+    return parsed;
+}
+
+std::string json_escape(std::string value) {
+    std::string out;
+    out.reserve(value.size() + 16);
+    for (const char ch : value) {
+        switch (ch) {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            out += ch;
+            break;
+        }
+    }
+    return out;
+}
+
+struct ValidationPreparationSnapshot {
+    std::string source_path;
+    std::string title_id;
+    std::string effective_app_version;
+    std::size_t mounted_dlc = 0;
+    std::size_t license_rifs = 0;
+};
+
+ValidationPreparationSnapshot snapshot_prepared_game(const EmuEnvState &emuenv, const fs::path &source_path, const std::string &title_id) {
+    ValidationPreparationSnapshot snapshot;
+    snapshot.source_path = fs_utils::path_to_utf8(source_path);
+    snapshot.title_id = title_id;
+
+    const fs::path temp_root = emuenv.cache_path / "pkgplay";
+    std::vector<uint8_t> sfo_bytes;
+    if (fs_utils::read_data(temp_root / "app/sce_sys/param.sfo", sfo_bytes)) {
+        sfo::SfoAppInfo info;
+        sfo::get_param_info(info, sfo_bytes, emuenv.cfg.sys_lang);
+        snapshot.effective_app_version = info.app_version;
+    }
+
+    boost::system::error_code ec;
+    const fs::path addcont_root = temp_root / "addcont";
+    if (fs::is_directory(addcont_root, ec)) {
+        for (fs::directory_iterator it(addcont_root, ec), end; it != end; it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (fs::is_directory(it->path(), ec))
+                ++snapshot.mounted_dlc;
+        }
+    }
+
+    ec.clear();
+    const fs::path license_root = emuenv.vita_fs_path / "ux0/license" / title_id;
+    if (fs::is_directory(license_root, ec)) {
+        for (fs::recursive_directory_iterator it(license_root, fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (!fs::is_regular_file(it->path(), ec))
+                continue;
+            if (string_utils::tolower(it->path().extension().string()) == ".rif")
+                ++snapshot.license_rifs;
+        }
+    }
+
+    return snapshot;
+}
+
+void write_validation_result(const fs::path &path, const ValidationPreparationSnapshot &snapshot,
+    bool boot_started, bool frames_observed, bool stable_runtime_complete,
+    int requested_runtime_seconds, int boot_timeout_seconds, int observed_runtime_ms,
+    const std::string &reason) {
+    boost::system::error_code ec;
+    if (!path.parent_path().empty())
+        fs::create_directories(path.parent_path(), ec);
+
+    fs::ofstream out(path, std::ios::out | std::ios::binary);
+    if (!out) {
+        LOG_ERROR("VALIDATION: could not write result file {}", fs_utils::path_to_utf8(path));
+        return;
+    }
+
+    const bool pass = boot_started && frames_observed && stable_runtime_complete;
+    out << "{\n"
+        << "  \"status\": \"" << (pass ? "pass" : "fail") << "\",\n"
+        << "  \"reason\": \"" << json_escape(reason) << "\",\n"
+        << "  \"source_path\": \"" << json_escape(snapshot.source_path) << "\",\n"
+        << "  \"title_id\": \"" << json_escape(snapshot.title_id) << "\",\n"
+        << "  \"effective_app_version\": \"" << json_escape(snapshot.effective_app_version) << "\",\n"
+        << "  \"mounted_dlc\": " << snapshot.mounted_dlc << ",\n"
+        << "  \"license_rifs\": " << snapshot.license_rifs << ",\n"
+        << "  \"boot_started\": " << (boot_started ? "true" : "false") << ",\n"
+        << "  \"frames_observed\": " << (frames_observed ? "true" : "false") << ",\n"
+        << "  \"stable_runtime_complete\": " << (stable_runtime_complete ? "true" : "false") << ",\n"
+        << "  \"requested_runtime_seconds\": " << requested_runtime_seconds << ",\n"
+        << "  \"boot_timeout_seconds\": " << boot_timeout_seconds << ",\n"
+        << "  \"observed_runtime_ms\": " << observed_runtime_ms << "\n"
+        << "}\n";
+    out.close();
+
+    LOG_INFO("VALIDATION: {} [{}] result={}", pass ? "PASS" : "FAIL", snapshot.title_id, fs_utils::path_to_utf8(path));
+}
+
+} // namespace
 
 int main(int argc, char *argv[]) {
 #ifdef __APPLE__
@@ -264,6 +397,17 @@ int main(int argc, char *argv[]) {
         emuenv.cfg.play_pkg_path.reset();
     }
 
+    const bool validation_mode = std::getenv("VITA3K_VALIDATE_GAME") != nullptr;
+    const int validation_runtime_seconds = validation_env_int("VITA3K_VALIDATE_RUNTIME", 10, 1, 600);
+    const int validation_boot_timeout_seconds = validation_env_int("VITA3K_VALIDATE_BOOT_TIMEOUT", 60, 5, 1800);
+    const char *validation_result_env = std::getenv("VITA3K_VALIDATE_RESULT");
+    fs::path validation_result_path;
+    if (validation_result_env && *validation_result_env)
+        validation_result_path = fs_utils::utf8_to_path(validation_result_env);
+    else
+        validation_result_path = emuenv.cache_path / "validation-result.json";
+    ValidationPreparationSnapshot validation_snapshot;
+
     // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
     // ux0/app. A synthetic apps-list entry lets the normal boot path (set_app_info -> load_app)
     // resolve to the mounted bundle; the mount serves app0:/addcont0: reads (see io/bundle.h).
@@ -303,14 +447,22 @@ int main(int argc, char *argv[]) {
     // Play a self-contained NoNpDrm pkg with no permanent install: decrypt to temp, mount, boot;
     // the temp tree is deleted when the game stops (io_deinit).
     if (emuenv.cfg.play_pkg_path.has_value()) {
+        const fs::path source_path = *emuenv.cfg.play_pkg_path;
         std::string play_error;
-        const std::string title_id = mount_pkg_for_play(emuenv, *emuenv.cfg.play_pkg_path, play_error);
+        const std::string title_id = mount_pkg_for_play(emuenv, source_path, play_error);
         if (title_id.empty()) {
-            LOG_CRITICAL("Failed to play pkg {}: {}", emuenv.cfg.play_pkg_path->string(), play_error);
+            LOG_CRITICAL("Failed to play pkg {}: {}", source_path.string(), play_error);
+            if (validation_mode) {
+                validation_snapshot.source_path = fs_utils::path_to_utf8(source_path);
+                write_validation_result(validation_result_path, validation_snapshot, false, false, false,
+                    validation_runtime_seconds, validation_boot_timeout_seconds, 0, "preparation_failed: " + play_error);
+            }
             return 1;
         }
         emuenv.cfg.run_app_path = title_id;
         LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
+        if (validation_mode)
+            validation_snapshot = snapshot_prepared_game(emuenv, source_path, title_id);
     }
 
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
@@ -319,13 +471,73 @@ int main(int argc, char *argv[]) {
 
     MainWindow mainwindow(emuenv, gui_settings, persistent_settings, admin_priv);
 
+    bool validation_pass = false;
+    if (validation_mode) {
+        LOG_INFO("VALIDATION: armed runtime={}s boot-timeout={}s result={}",
+            validation_runtime_seconds, validation_boot_timeout_seconds, fs_utils::path_to_utf8(validation_result_path));
+
+        const auto validation_started = std::chrono::steady_clock::now();
+        auto first_frame_at = validation_started;
+        bool boot_started = false;
+        bool frames_observed = false;
+        bool first_frame_recorded = false;
+
+        auto *validation_timer = new QTimer(&mainwindow);
+        validation_timer->setInterval(250);
+        QObject::connect(validation_timer, &QTimer::timeout, &mainwindow, [&]() {
+            if (QWidget *modal = QApplication::activeModalWidget()) {
+                if (auto *box = qobject_cast<QMessageBox *>(modal)) {
+                    LOG_WARN("VALIDATION: closing modal dialog: {}", box->text().toStdString());
+                    box->done(QMessageBox::Ok);
+                }
+            }
+
+            if (emuenv.main_thread_id != 0)
+                boot_started = true;
+
+            if (!frames_observed && (emuenv.frame_count > 0 || emuenv.fps > 0)) {
+                frames_observed = true;
+                first_frame_recorded = true;
+                first_frame_at = std::chrono::steady_clock::now();
+                LOG_INFO("VALIDATION: first rendered frames observed for [{}]", validation_snapshot.title_id);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const int total_elapsed_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - validation_started).count());
+            const int stable_elapsed_ms = first_frame_recorded
+                ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - first_frame_at).count())
+                : 0;
+
+            const bool stable_runtime_complete = frames_observed && stable_elapsed_ms >= validation_runtime_seconds * 1000;
+            const bool timed_out = total_elapsed_ms >= validation_boot_timeout_seconds * 1000;
+            if (!stable_runtime_complete && !timed_out)
+                return;
+
+            validation_pass = boot_started && frames_observed && stable_runtime_complete;
+            const std::string reason = validation_pass
+                ? "booted_and_rendered"
+                : (boot_started ? "boot_started_but_no_stable_rendering_before_timeout" : "boot_did_not_start_before_timeout");
+
+            write_validation_result(validation_result_path, validation_snapshot, boot_started, frames_observed,
+                stable_runtime_complete, validation_runtime_seconds, validation_boot_timeout_seconds,
+                stable_elapsed_ms, reason);
+
+            validation_timer->stop();
+            QMetaObject::invokeMethod(&mainwindow, "on_stop_triggered", Qt::DirectConnection);
+            QTimer::singleShot(250, &app, &QCoreApplication::quit);
+        });
+        validation_timer->start();
+    }
+
     mainwindow.show();
-    if (mainwindow.prompt_startup_warnings())
+    if (validation_mode || mainwindow.prompt_startup_warnings())
         app.exec();
 
 #ifdef _WIN32
     CoUninitialize();
 #endif
 
+    if (validation_mode && !validation_pass)
+        return 2;
     return Success;
 }
