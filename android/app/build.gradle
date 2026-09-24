@@ -19,7 +19,8 @@ android {
 	}
 
 	defaultConfig {
-		applicationId = "org.vita3k.emulator"
+		// namespace stays org.vita3k.emulator: native code binds JNI symbols to that Java package
+		applicationId = "io.github.sayenah.vita3knoinstall"
 		minSdk = 28
 		targetSdk = 35
 		versionCode = 21

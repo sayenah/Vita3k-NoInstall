@@ -4,6 +4,6 @@ LIST(APPEND FREEDESKTOP_RELEASE_INFO
 )
 
 configure_file(
-    ${CMAKE_SOURCE_DIR}/dist/linux/org.vita3k.vita3k.metainfo.xml.in
-    ${CMAKE_SOURCE_DIR}/dist/linux/org.vita3k.vita3k.metainfo.xml
+    ${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml.in
+    ${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml
 )
