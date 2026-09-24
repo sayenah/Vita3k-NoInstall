@@ -29,6 +29,8 @@
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>
 
+#include <atomic>
+
 #include <util/align.h>
 #include <util/log.h>
 #include <util/tracy.h>
@@ -78,13 +80,38 @@ COMMAND_SET_STATE(region_clip) {
 COMMAND_SET_STATE(program) {
     TRACY_FUNC_COMMANDS_SET_STATE(program);
     const Ptr<void> program = helper.pop<Ptr<void>>();
+    auto *binding_payload = helper.pop<std::shared_ptr<ProgramBinding> *>();
     const bool is_fragment = helper.pop<bool>();
+
+    if (!binding_payload || !*binding_payload) {
+        LOG_ERROR("SetProgram command has no host-side program binding");
+        return;
+    }
+
+    const std::shared_ptr<ProgramBinding> binding = *binding_payload;
+    // Immediate commands execute once. Deferred commands may be linked and executed again, so
+    // their payload is released only when the deferred command list is destroyed.
+    if (!(helper.cmd->flags & Command::FLAG_NO_FREE))
+        delete binding_payload;
+
+    // A binding only carries the program of its own kind, so a mismatch means the handle no longer describes it
+    if (is_fragment ? !binding->fragment_program : !binding->vertex_program) {
+        static std::atomic<uint32_t> mismatched{ 0 };
+        const uint32_t n = mismatched.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8 || (n & 1023) == 0)
+            LOG_ERROR("[PROGMIX] SetProgram({}) got a binding without a {} program: handle 0x{:X} binding {} vert={} frag={} gxp={} streams={} attrs={} key_hash=0x{:X} maskupdate={} deferred={} - ignored (#{})",
+                is_fragment ? "fragment" : "vertex", is_fragment ? "fragment" : "vertex", program.address(),
+                fmt::ptr(binding.get()), static_cast<bool>(binding->vertex_program), static_cast<bool>(binding->fragment_program),
+                binding->gxp.size(), binding->streams.size(), binding->attributes.size(), binding->key_hash,
+                binding->is_maskupdate, static_cast<bool>(helper.cmd->flags & Command::FLAG_NO_FREE), n);
+        return;
+    }
 
     if (is_fragment) {
         render_context->record.fragment_program = program.cast<SceGxmFragmentProgram>();
-        const SceGxmFragmentProgram *gxm_program = render_context->record.fragment_program.get(mem);
-        render_context->record.fragment_program_hash = gxm_program->renderer_data->hash;
-        render_context->record.is_maskupdate = gxm_program->is_maskupdate;
+        render_context->record.fragment_program_binding = binding;
+        render_context->record.fragment_program_hash = binding->fragment_program->hash;
+        render_context->record.is_maskupdate = binding->is_maskupdate;
 
         switch (renderer.current_backend) {
         case Backend::OpenGL:
@@ -100,8 +127,8 @@ COMMAND_SET_STATE(program) {
         }
     } else {
         render_context->record.vertex_program = program.cast<SceGxmVertexProgram>();
-        const SceGxmVertexProgram *gxm_program = render_context->record.vertex_program.get(mem);
-        render_context->record.vertex_program_hash = gxm_program->renderer_data->hash;
+        render_context->record.vertex_program_binding = binding;
+        render_context->record.vertex_program_hash = binding->vertex_program->hash;
     }
 
     if (renderer.current_backend == Backend::Vulkan) {
@@ -116,8 +143,8 @@ COMMAND_SET_STATE(uniform_buffer) {
     const int block_num = helper.pop<int>();
     const std::uint32_t size = helper.pop<std::uint32_t>();
 
-    renderer::ShaderProgram *program = is_vertex ? reinterpret_cast<ShaderProgram *>(render_context->record.vertex_program.get(mem)->renderer_data.get())
-                                                 : reinterpret_cast<ShaderProgram *>(render_context->record.fragment_program.get(mem)->renderer_data.get());
+    renderer::ShaderProgram *program = is_vertex ? static_cast<ShaderProgram *>(render_context->record.vertex_program_binding->vertex_program.get())
+                                                 : static_cast<ShaderProgram *>(render_context->record.fragment_program_binding->fragment_program.get());
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:

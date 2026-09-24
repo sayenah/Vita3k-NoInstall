@@ -1,10 +1,12 @@
 set(VITA3K_ORG_NAME "Vita3K")
+# APP_NAME is the on-disk data folder name, keep it: DISPLAY_NAME is what the user sees
 set(VITA3K_APP_NAME "Vita3K")
 set(VITA3K_APP_ID "org.vita3k.vita3k")
 set(VITA3K_APP_VER_HI 0)
 set(VITA3K_APP_VER_MID 2)
 set(VITA3K_APP_VER_LO 1)
 set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}.${VITA3K_APP_VER_LO}")
+set(VITA3K_DISPLAY_NAME "Vita3K")
 
 execute_process(
 	COMMAND git rev-list HEAD --count
@@ -62,11 +64,13 @@ else()
 	set(VITA3K_GIT_REV "${GIT_HASH}-${GIT_REPO}/${GIT_BRANCH}")
 endif()
 
+set(VITA3K_APP_NUMBER ${GIT_COUNT})
+
 file(WRITE ${CMAKE_BINARY_DIR}/vita3k/config/gitver.h
 	"#define APP_VER_HI ${VITA3K_APP_VER_HI}\n"
 	"#define APP_VER_MID ${VITA3K_APP_VER_MID}\n"
 	"#define APP_VER_LO ${VITA3K_APP_VER_LO}\n"
-	"#define APP_NUMBER ${GIT_COUNT}\n"
+	"#define APP_NUMBER ${VITA3K_APP_NUMBER}\n"
 )
 
 include_directories(${CMAKE_BINARY_DIR}/vita3k/config)
@@ -100,7 +104,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT MSVC)
-	add_compile_options(-Wformat -Werror=format-security)
+	add_compile_options(-Wformat -Werror=format-security -Werror=return-type)
 endif()
 
 if(NOT ANDROID)
@@ -210,7 +214,7 @@ if(WIN32)
 	target_sources(vita3k PRIVATE util/src/vc_runtime_checker.cpp)
 endif()
 
-target_link_libraries(vita3k PRIVATE app audio compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion packages patch renderer shader touch util psvpfsparser)
+target_link_libraries(vita3k PRIVATE app audio codec compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion packages patch renderer shader touch util psvpfsparser)
 if(NOT ANDROID)
 	target_link_libraries(vita3k PRIVATE gui-qt)
 endif()
@@ -415,7 +419,7 @@ elseif(LINUX)
 	endif()
 elseif(WIN32)
 	target_link_libraries(vita3k PRIVATE Version)
-	target_sources(vita3k PRIVATE resource.h Vita3K.ico Vita3K.rc Windows.manifest)
+	target_sources(vita3k PRIVATE resource.h Vita3KPlus.ico Vita3K.rc Windows.manifest)
 	set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT vita3k)
 	set_target_properties(vita3k PROPERTIES WIN32_EXECUTABLE TRUE VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$(Configuration)")
 	add_custom_command(

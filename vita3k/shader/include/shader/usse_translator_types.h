@@ -66,6 +66,11 @@ struct SpirvShaderParameters {
     // for fragment: fragment outputs (color outputs)
     SpirvVarRegBank outs;
 
+    // Native-colour fragment programs created with a non-declared output register format only
+    // true for a typed float result
+    // false for a raw move or an integer store
+    spv::Id frag_output_holds_declared_type = 0;
+
     // Mapped to 'idx' (index) USSE registers
     // Use for indexing bank registers dynamically
     SpirvVarRegBank indexes;
@@ -79,6 +84,10 @@ struct SpirvShaderParameters {
 
     // Uniform buffer map contains layout info of a UBO inside the big SSBO.
     // only used if memory mapping is not enabled
+
+    // number of primary-attribute (pa) registers populated by the shader input setup
+    std::uint32_t frag_input_pa_regs = 0;
+
     std::map<std::uint32_t, SpirvUniformBufferInfo> buffers;
 
     // when not using buffer device address, contains the storage buffer type
@@ -88,6 +97,9 @@ struct SpirvShaderParameters {
     int buffer_addresses_id;
     int viewport_ratio_id;
     int viewport_offset_id;
+
+    // number of entries in the buffer_addresses[] uniform array
+    int buffer_count = 0;
 
     // when using a thread, texture or literal buffer, if not -1, this fields contain the sa register
     // with the matching address, this assumes of course that this address is not copied somewhere
@@ -104,6 +116,10 @@ struct SpirvShaderParameters {
     spv::Id thread_buffer;
 
     spv::Id render_info_id;
+
+    spv::Id frag_coord_id = 0;
+
+    spv::Id front_facing_id = 0;
 
     // When using shader interlock, specialization constant telling us if the texture is gamma corrected
     spv::Id is_srgb_constant;
@@ -124,6 +140,7 @@ struct NonDependentTextureQueryCallInfo {
 
     DataType component_type;
     uint8_t component_count;
+    uint8_t store_component_count = 0; // How many components the query actually writes
 };
 
 using NonDependentTextureQueryCallInfos = std::vector<NonDependentTextureQueryCallInfo>;

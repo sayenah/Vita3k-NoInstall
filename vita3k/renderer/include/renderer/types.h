@@ -27,6 +27,7 @@
 #include <array>
 #include <bitset>
 #include <map>
+#include <memory>
 #include <vector>
 
 static constexpr auto DEFAULT_RES_WIDTH = 960;
@@ -37,6 +38,8 @@ struct SceGxmProgram;
 using UniformBufferSizes = std::array<std::uint32_t, 15>;
 
 namespace renderer {
+
+struct ProgramBinding;
 
 // State types
 typedef std::map<Sha256Hash, const SceGxmProgram *> GXPPtrMap;
@@ -131,6 +134,8 @@ struct GxmRecordState {
     // Programs.
     Ptr<SceGxmFragmentProgram> fragment_program;
     Ptr<SceGxmVertexProgram> vertex_program;
+    std::shared_ptr<ProgramBinding> fragment_program_binding;
+    std::shared_ptr<ProgramBinding> vertex_program_binding;
 
     SceGxmColorSurface color_surface;
     SceGxmDepthStencilSurface depth_stencil_surface;
@@ -161,6 +166,7 @@ struct Context {
     CommandList command_list;
     CommandAllocFunc alloc_func;
     CommandFreeFunc free_func;
+    std::function<std::string()> describe_command_allocator;
 
     int render_finish_status = 0;
     int notification_finish_status = 0;
@@ -189,10 +195,28 @@ struct ShaderProgram {
 };
 
 struct FragmentProgram : ShaderProgram {
+    SceGxmOutputRegisterFormat output_register_format = SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
+    SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE;
+    uint8_t color_write_mask = 0xF;
 };
 
 struct VertexProgram : ShaderProgram {
     shader::usse::AttributeInformationMap attribute_infos;
+    uint32_t varying_location_mask = 0xFFFFFFFFu; // (0xFFFFFFFF = not yet computed)
+};
+
+struct ProgramBinding {
+    std::vector<uint8_t> gxp;
+    std::shared_ptr<FragmentProgram> fragment_program;
+    std::shared_ptr<VertexProgram> vertex_program;
+    std::vector<SceGxmVertexStream> streams;
+    std::vector<SceGxmVertexAttribute> attributes;
+    uint64_t key_hash = 0;
+    bool is_maskupdate = false;
+
+    const SceGxmProgram *program() const {
+        return reinterpret_cast<const SceGxmProgram *>(gxp.data());
+    }
 };
 
 struct ShadersHash {

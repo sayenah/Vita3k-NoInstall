@@ -15,15 +15,41 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <chrono>
 #include <cpu/functions.h>
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
+#include <kernel/thread/thread_state.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <kernel/types.h>
+#include <set>
+#include <thread>
 #include <util/lock_and_find.h>
 #include <util/log.h>
+#include <vector>
 
 static constexpr bool LOG_SYNC_PRIMITIVES = false;
+
+static void preempt_yield_to_woken(int window_us) {
+    if (window_us <= 0)
+        return;
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::microseconds(window_us))
+        std::this_thread::yield();
+}
+
+static void preempt_after_wake(KernelState &kernel, SceUID caller_tid, int best_woken_prio) {
+    if (best_woken_prio == 0x7fffffff)
+        return;
+    const ThreadStatePtr caller = kernel.get_thread(caller_tid);
+    if (!caller)
+        return;
+    if (best_woken_prio < caller->priority)
+        preempt_yield_to_woken(kernel.preempt_on_wake_us);
+}
 
 // ***********
 // * Helpers *
@@ -49,12 +75,85 @@ inline static CondvarPtrs &get_condvars(KernelState &kernel, SyncWeight weight) 
     return weight == SyncWeight::Light ? kernel.lwcondvars : kernel.condvars;
 }
 
+namespace {
+
+struct EvfOp {
+    uint64_t ms;
+    SceUID evf;
+    SceUID thread;
+    uint8_t op; // 0=SET 1=CLEAR 2=WAIT_OK 3=WAIT_BLOCK 4=CANCEL
+    uint32_t bits;
+    uint32_t flags_after;
+    uint32_t woken;
+};
+constexpr size_t EVF_RING_SIZE = 512;
+std::array<EvfOp, EVF_RING_SIZE> evf_ring{};
+std::atomic<uint64_t> evf_ring_next{ 0 };
+
+// every thread that EVER set each flag: the provable-cycle breaker needs "who could wake this"
+std::mutex evf_setters_mutex;
+std::unordered_map<SceUID, std::set<SceUID>> evf_setters;
+std::mutex evf_dead_since_mutex;
+std::unordered_map<SceUID, uint64_t> evf_dead_since;
+
+void evf_record(SceUID evf, SceUID thread, uint8_t op, uint32_t bits, uint32_t flags_after, uint32_t woken) {
+    if (op == 0 && thread > 0) {
+        const std::lock_guard<std::mutex> lock(evf_setters_mutex);
+        evf_setters[evf].insert(thread);
+    }
+    const uint64_t idx = evf_ring_next.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    evf_ring[idx % EVF_RING_SIZE] = EvfOp{ ms, evf, thread, op, bits, flags_after, woken };
+}
+
+// A condvar hang is either the game never producing or a signal we delivered to nobody
+struct CondOp {
+    uint64_t ms;
+    SceUID cond;
+    SceUID thread;
+    uint8_t op; // 0=WAIT_BLOCK 1=WAIT_DONE 2=SIGNAL 3=SIGNAL_UNDELIVERED
+    uint32_t waiters;
+    int32_t result;
+};
+constexpr size_t COND_RING_SIZE = 512;
+std::array<CondOp, COND_RING_SIZE> cond_ring{};
+std::atomic<uint64_t> cond_ring_next{ 0 };
+
+void cond_record(SceUID cond, SceUID thread, uint8_t op, uint32_t waiters, int32_t result) {
+    const uint64_t idx = cond_ring_next.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    cond_ring[idx % COND_RING_SIZE] = CondOp{ ms, cond, thread, op, waiters, result };
+}
+
+struct MutexCacheEntry {
+    SceUID uid = 0;
+    SyncWeight weight = SyncWeight::Light;
+    MutexPtr ptr;
+};
+thread_local std::array<MutexCacheEntry, 8> g_mutex_cache;
+thread_local uint32_t g_mutex_cache_next = 0;
+} // namespace
+
 inline static int find_mutex(MutexPtr &mutex_out, MutexPtrs **mutexes_out, KernelState &kernel, const char *export_name, SceUID mutexid, SyncWeight weight) {
     MutexPtrs &mutexes = get_mutexes(kernel, weight);
+
+    for (auto &entry : g_mutex_cache) {
+        if (entry.uid == mutexid && entry.weight == weight && entry.ptr
+            && !entry.ptr->deleted.load(std::memory_order_relaxed)) {
+            mutex_out = entry.ptr;
+            if (mutexes_out)
+                *mutexes_out = &mutexes;
+            return SCE_KERNEL_OK;
+        }
+    }
+
     mutex_out = lock_and_find(mutexid, mutexes, kernel.mutex);
     if (!mutex_out) {
         return unknown_mutex_id(export_name, weight);
     }
+
+    auto &slot = g_mutex_cache[g_mutex_cache_next++ % g_mutex_cache.size()];
+    slot = { mutexid, weight, mutex_out };
 
     if (mutexes_out)
         *mutexes_out = &mutexes;
@@ -75,40 +174,75 @@ inline static int find_condvar(CondvarPtr &condvar_out, CondvarPtrs **condvars_o
     return SCE_KERNEL_OK;
 }
 
+// A callback notified while its owner is already blocked cannot wake it
+inline static bool callback_pending(const std::vector<CallbackPtr> &callbacks) {
+    for (const CallbackPtr &cb : callbacks) {
+        if (cb->is_executable())
+            return true;
+    }
+    return false;
+}
+
 // TODO: Write remaining time to timeout ptr when it's successfully signaled
 // Assumes primitive_lock is locked and thread_lock is unlocked
 inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
     SceUInt *const timeout) {
+    guest_sched_release_for_block();
+
+    // the kernel runs a callback on a blocked thread and then resumes its wait
+    const std::vector<CallbackPtr> callbacks = thread_in_callback_wait() ? thread->callbacks : std::vector<CallbackPtr>();
+    const bool cb_wait = !callbacks.empty();
+    constexpr uint32_t CALLBACK_POLL_US = 2000;
+    // A waker holding only thread->mutex can miss this condition variable so rechecking it on a timer
+    constexpr uint32_t WAKE_RECHECK_US = 20000;
+
+    auto unwind = [&]() {
+        thread_lock.lock();
+        thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        thread_lock.unlock();
+
+        queue->erase(data_it);
+    };
+
     if (timeout) {
+        const uint32_t budget = *timeout;
+        const auto start = std::chrono::steady_clock::now();
         bool status = false;
-        auto start = std::chrono::steady_clock::now();
-        if (*timeout > 0) {
-            status = thread->status_cond.wait_for(primitive_lock, std::chrono::microseconds{ *timeout }, [&] { return thread->status == ThreadStatus::run; });
-        }
+        bool interrupted = false;
+        uint32_t used = 0;
 
-        if (!status) {
-            *timeout = 0; // Time run out, so remaining time is 0
-
-            thread_lock.lock();
-            thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-            thread_lock.unlock();
-
-            queue->erase(data_it);
-
-            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
-        } else {
-            auto end = std::chrono::steady_clock::now();
-            uint32_t real_timeout = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
-            if (real_timeout > *timeout) {
-                *timeout = 0;
-            } else {
-                *timeout = *timeout - real_timeout;
+        while (used < budget) {
+            const uint32_t slice = cb_wait ? std::min(budget - used, CALLBACK_POLL_US) : (budget - used);
+            status = thread->wait_for_run_precise(primitive_lock, static_cast<int64_t>(slice));
+            used = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+            if (status)
+                break;
+            if (cb_wait && callback_pending(callbacks)) {
+                interrupted = true;
+                break;
             }
         }
+
+        *timeout = (used >= budget) ? 0 : budget - used;
+
+        if (!status) {
+            unwind();
+
+            return interrupted ? VITA3K_WAIT_INTERRUPTED_BY_CB : RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+        }
     } else {
-        thread->status_cond.wait(primitive_lock, [&] { return thread->status == ThreadStatus::run; });
+        const auto recheck = std::chrono::microseconds(cb_wait ? CALLBACK_POLL_US : WAKE_RECHECK_US);
+        while (thread->status != ThreadStatus::run) {
+            thread->status_cond.wait_for(primitive_lock, recheck);
+
+            if (cb_wait && thread->status != ThreadStatus::run && callback_pending(callbacks)) {
+                unwind();
+
+                return VITA3K_WAIT_INTERRUPTED_BY_CB;
+            }
+        }
     }
 
     return SCE_KERNEL_OK;
@@ -166,6 +300,8 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
     }
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
     std::unique_lock<std::mutex> event_lock(event->mutex);
 
@@ -182,6 +318,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
 
         return SCE_KERNEL_OK;
     } else if (is_wait) {
+        thread->set_wait_reason("event", event_id, wait_pattern);
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -416,6 +553,8 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
         LOG_WARN_ONCE("Ignoring timeout");
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
     std::unique_lock<std::mutex> lock(timer->mutex);
 
@@ -564,9 +703,13 @@ SceUID mutex_create(SceUID *uid_out, KernelState &kernel, MemState &mem, const c
     strncpy(mutex->name, mutex_name, KERNELOBJECT_MAX_NAME_LENGTH);
     mutex->attr = attr;
     mutex->owner = nullptr;
+    mutex->owner_id = 0;
     if (init_count > 0) {
         const ThreadStatePtr thread = kernel.get_thread(thread_id);
+        if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+            return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
         mutex->owner = thread;
+        mutex->owner_id = thread_id;
     }
     if (mutex->attr & SCE_KERNEL_ATTR_TH_PRIO) {
         mutex->waiting_threads = std::make_unique<PriorityThreadDataQueue<WaitingThreadData>>();
@@ -624,21 +767,20 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
             mutex->waiting_threads->size());
     }
 
-    const ThreadStatePtr thread = kernel.get_thread(thread_id);
-
+    // The thread handle and the wait bookkeeping are only needed once a thread has to block or take
+    // ownership and this is the hottest call in the emulator
     std::unique_lock<std::mutex> mutex_lock(mutex->mutex);
 
-    bool is_recursive = (mutex->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE);
+    const bool is_recursive = (mutex->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE);
 
     // Already owned
     if (mutex->lock_count > 0) {
         // Owned by ourselves
-        if (mutex->owner == thread) {
+        if (mutex->owner_id == thread_id) {
             if (is_recursive) {
                 mutex->lock_count += lock_count;
                 if (weight == SyncWeight::Light)
                     mutex->workarea.get(mem)->lockCount += lock_count;
-
                 return SCE_KERNEL_OK;
             }
             if (weight == SyncWeight::Light)
@@ -657,6 +799,11 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         }
 
         // Sleep thread!
+        const ThreadStatePtr thread = kernel.get_thread(thread_id);
+        if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+            return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+        thread->set_wait_reason("mutex", mutex->uid, mutex->owner_id);
+
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -668,28 +815,39 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         const auto data_it = mutex->waiting_threads->push(data);
         thread_lock.unlock();
 
-        int res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+        int res;
+        while (true) {
+            res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+
+            if (res != SCE_KERNEL_OK || mutex->owner_id == thread_id || thread->is_delete_requested())
+                break;
+
+            thread_lock.lock();
+            thread->update_status(ThreadStatus::wait, ThreadStatus::run);
+            thread_lock.unlock();
+        }
 
         if (weight == SyncWeight::Light) {
             mutex->workarea.get(mem)->lockCount = mutex->lock_count;
-            if (mutex->owner == thread) {
+            if (mutex->owner_id == thread_id) {
                 mutex->workarea.get(mem)->owner = thread_id;
             }
         }
 
         return res;
     }
-    // Not owned
-    // Take ownership!
+    // Not owned so take ownership i.e. The one place an uncontended lock needs the handle
+    const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
     mutex->lock_count += lock_count;
     mutex->owner = thread;
+    mutex->owner_id = thread_id;
 
     if (weight == SyncWeight::Light) {
         mutex->workarea.get(mem)->lockCount = mutex->lock_count;
-        if (mutex->owner == thread) {
-            mutex->workarea.get(mem)->owner = thread_id;
-        }
+        mutex->workarea.get(mem)->owner = thread_id;
     }
 
     return SCE_KERNEL_OK;
@@ -715,40 +873,62 @@ int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, 
     return mutex_lock_impl(kernel, mem, export_name, thread_id, lock_count, mutex, weight, nullptr, true);
 }
 
-inline static int mutex_unlock_impl(KernelState &kernel, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {
-    const ThreadStatePtr current_thread = kernel.get_thread(thread_id);
+inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {
+    int woken_prio = 0x7fffffff; // priority of the thread we hand the mutex to, if any (preempt-on-wake)
+    {
+        const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
 
-    const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
-
-    if (current_thread == mutex->owner) {
-        if (unlock_count > mutex->lock_count) {
-            return RET_ERROR(SCE_KERNEL_ERROR_LW_MUTEX_UNLOCK_UDF);
-        }
-
-        mutex->lock_count -= unlock_count;
-
-        if (mutex->lock_count == 0) {
-            mutex->owner = nullptr;
-
-            if (!mutex->waiting_threads->empty()) {
-                const auto waiting_thread_data = *mutex->waiting_threads->begin();
-                const auto waiting_thread = waiting_thread_data.thread;
-                const auto waiting_lock_count = waiting_thread_data.lock_count;
-
-                const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-                waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-
-                mutex->waiting_threads->pop();
-                mutex->lock_count += waiting_lock_count;
-                mutex->owner = waiting_thread;
+        if (mutex->owner_id == thread_id) {
+            if (unlock_count > mutex->lock_count) {
+                return RET_ERROR(SCE_KERNEL_ERROR_LW_MUTEX_UNLOCK_UDF);
             }
+
+            mutex->lock_count -= unlock_count;
+
+            if (mutex->lock_count == 0) {
+                mutex->owner = nullptr;
+                mutex->owner_id = 0;
+
+                if (!mutex->waiting_threads->empty()) {
+                    const auto waiting_thread_data = *mutex->waiting_threads->begin();
+                    const auto waiting_thread = waiting_thread_data.thread;
+                    const auto waiting_lock_count = waiting_thread_data.lock_count;
+
+                    const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+                    waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                    woken_prio = waiting_thread->priority;
+
+                    mutex->waiting_threads->pop();
+                    mutex->lock_count += waiting_lock_count;
+                    mutex->owner = waiting_thread;
+                    mutex->owner_id = waiting_thread->id;
+                }
+            }
+
+            // keep the lwmutex workarea in sync
+            if (mutex->workarea) {
+                SceKernelLwMutexWork *workarea_mem = mutex->workarea.get(mem);
+                workarea_mem->lockCount = mutex->lock_count;
+                workarea_mem->owner = mutex->owner ? mutex->owner->id : 0;
+            }
+        } else {
+            // The kernel rejects an unlock by a thread that does not own the mutex
+            static std::atomic<uint32_t> foreign_unlocks{ 0 };
+            const uint32_t n = foreign_unlocks.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 16 || (n & 1023) == 0)
+                LOG_WARN("[LWMUTEX] {}: thread {} unlocked mutex#{} '{}' it does not own (owner {}, lock_count {}) - ignored (#{})",
+                    export_name, thread_id, mutex->uid, mutex->name,
+                    mutex->owner ? fmt::format("'{}' ({})", mutex->owner->name, mutex->owner->id) : std::string("nobody"), mutex->lock_count, n);
         }
     }
+
+    if (kernel.preempt_on_wake && woken_prio != 0x7fffffff)
+        preempt_after_wake(kernel, thread_id, woken_prio);
 
     return SCE_KERNEL_OK;
 }
 
-int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight) {
+int mutex_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight) {
     assert(mutexid >= 0);
 
     MutexPtr mutex;
@@ -761,7 +941,7 @@ int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id,
             mutex->waiting_threads->size());
     }
 
-    return mutex_unlock_impl(kernel, export_name, thread_id, unlock_count, mutex);
+    return mutex_unlock_impl(kernel, mem, export_name, thread_id, unlock_count, mutex);
 }
 
 int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight) {
@@ -779,6 +959,7 @@ int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id,
     }
 
     if (mutex->waiting_threads->empty()) {
+        mutex->deleted.store(true, std::memory_order_relaxed);
         const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
         mutexes->erase(mutexid);
     } else {
@@ -839,6 +1020,8 @@ SceUID rwlock_create(KernelState &kernel, MemState &mem, const char *export_name
 
 SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, uint32_t *timeout, bool is_write) {
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     const RWLockPtr rwlock = lock_and_find(lock_id, kernel.rwlocks, kernel.mutex);
 
     if (!rwlock)
@@ -855,9 +1038,11 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
     // if it is a read lock, it is always recursive
     bool is_recursive = !is_write || (rwlock->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE);
 
+    const bool anyone_waiting = !rwlock->waiting_threads->empty();
+
     // cases where we don't need to wait :
     if (rwlock->state == RWLockState::Unlocked // the lock is unlocked
-        || (!is_write && rwlock->state == RWLockState::ReadLocked) // we want a read lock when the lock is readlocked
+        || (!is_write && rwlock->state == RWLockState::ReadLocked && !anyone_waiting) // read lock on a read-locked lock, and nothing queued (matches hardware)
         || (is_recursive && rwlock->owners.contains(thread))) { // the thread asking has already locked this lock
 
         auto it = rwlock->owners.find(thread);
@@ -893,6 +1078,8 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
 
 SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, bool is_write) {
     const ThreadStatePtr current_thread = kernel.get_thread(thread_id);
+    if (!current_thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     const RWLockPtr rwlock = lock_and_find(lock_id, kernel.rwlocks, kernel.mutex);
 
     if (!rwlock)
@@ -955,6 +1142,8 @@ SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_na
 
 SceInt32 rwlock_delete(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id) {
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     const RWLockPtr rwlock = lock_and_find(lock_id, kernel.rwlocks, kernel.mutex);
 
     if (!rwlock)
@@ -1047,7 +1236,10 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
     }
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
+    thread->set_wait_reason("sema", semaId, needCount);
     std::unique_lock<std::mutex> semaphore_lock(semaphore->mutex);
 
     if (semaphore->val < needCount) {
@@ -1209,6 +1401,7 @@ SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_n
     }
 
     const CondvarPtr condvar = std::make_shared<Condvar>();
+    condvar->uid = uid;
     condvar->attr = attr;
     condvar->associated_mutex = std::move(assoc_mutex);
     strncpy(condvar->name, name, KERNELOBJECT_MAX_NAME_LENGTH);
@@ -1243,10 +1436,13 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     }
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
+    thread->set_wait_reason("cond", condvar->uid, condvar->associated_mutex ? condvar->associated_mutex->uid : 0);
     std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);
 
-    if (auto error = mutex_unlock_impl(kernel, export_name, thread_id, 1, condvar->associated_mutex))
+    if (auto error = mutex_unlock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex))
         return error;
 
     std::unique_lock<std::mutex> thread_lock(thread->mutex);
@@ -1258,12 +1454,42 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
 
     const auto data_it = condvar->waiting_threads->push(data);
     thread_lock.unlock();
+    cond_record(condvar->uid, thread_id, 0, static_cast<uint32_t>(condvar->waiting_threads->size()), 0);
 
-    if (auto error = handle_timeout(kernel, thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout))
-        return error;
-
+    const int wait_res = handle_timeout(kernel, thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout);
     condition_variable_lock.unlock();
-    return mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, timeout, false);
+    cond_record(condvar->uid, thread_id, 1, static_cast<uint32_t>(condvar->waiting_threads->size()), wait_res);
+
+    const CallbackWaitScope no_callbacks(false);
+
+    // The kernel hands the associated mutex back to the waiter before returning no matter how the wait
+    // ended, and Sony's own libraries depend on that: the Fios scheduler records itself as the owner of
+    // its lock after every return from sceKernelWaitLwCond, timeout included, and traps on a later unlock
+    // by a thread that is not the recorded owner. Returning WAIT_TIMEOUT without the mutex let another
+    // thread take and release it in between, which is exactly that trap. The re-lock is untimed; a
+    // waiter that times out still comes back owning the mutex.
+    if (wait_res != SCE_KERNEL_OK) {
+        ThreadStatePtr holder;
+        {
+            const std::lock_guard<std::mutex> owner_guard(condvar->associated_mutex->mutex);
+            holder = condvar->associated_mutex->owner;
+        }
+        const auto relock_start = std::chrono::steady_clock::now();
+        const int lock_res = mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, nullptr, false);
+        const auto relock_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - relock_start).count();
+        static std::atomic<uint32_t> timeouts{ 0 };
+        static std::atomic<int64_t> last_log_us{ 0 };
+        const uint32_t n = timeouts.fetch_add(1, std::memory_order_relaxed) + 1;
+        const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (n <= 8 || holder || lock_res != SCE_KERNEL_OK || now_us - last_log_us.load(std::memory_order_relaxed) >= 60'000'000) {
+            last_log_us.store(now_us, std::memory_order_relaxed);
+            LOG_DEBUG("[LWCOND] {}: timed wait on cond#{} '{}' by '{}' ({}) timed out; re-acquired mutex#{} (held by {} at the timeout, re-lock took {} us, result 0x{:X}) - timeout #{}",
+                export_name, condvar->uid, condvar->name, thread->name, thread_id, condvar->associated_mutex->uid,
+                holder ? fmt::format("'{}' ({})", holder->name, holder->id) : std::string("nobody"), relock_us, static_cast<uint32_t>(lock_res), n);
+        }
+        return wait_res;
+    }
+    return mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, nullptr, false);
 }
 
 int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {
@@ -1295,19 +1521,26 @@ int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_i
             waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
             waiting_threads->erase(waiting_thread_iter);
         } else {
-            LOG_ERROR("{}: Target thread {} not found", export_name, waiting_thread->name);
+            // Returning ok here silently dropped the wake
+            cond_record(condid, thread_id, 3, 0, 0);
+            LOG_ERROR("[SYNCLOST] {}: SignalCondTo target '{}' (tid {}) is NOT waiting on cv {} - signal undeliverable, returning error", export_name, waiting_thread ? waiting_thread->name : "?", signal_target.thread_id, condid);
+            return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
         }
+        cond_record(condid, thread_id, 2, 1, 0);
     } else {
+        const bool wake_all = (target_type == Condvar::SignalTarget::Type::All);
+        uint32_t woken = 0;
         while (!waiting_threads->empty()) {
             const auto waiting_thread_data = *waiting_threads->begin();
             auto waiting_thread = waiting_thread_data.thread;
-            const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex, std::try_to_lock);
-            if (!waiting_thread_lock)
-                continue;
-
+            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
             waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
             waiting_threads->pop();
+            woken++;
+            if (!wake_all)
+                break;
         }
+        cond_record(condid, thread_id, woken ? 2 : 3, woken, 0);
     }
 
     return SCE_KERNEL_OK;
@@ -1356,6 +1589,7 @@ SceUID eventflag_clear(KernelState &kernel, const char *export_name, SceUID evfI
     const std::lock_guard<std::mutex> event_lock(event->mutex);
 
     event->flags &= bitPattern;
+    evf_record(evfId, 0, 1, bitPattern, event->flags, 0);
 
     return SCE_KERNEL_OK;
 }
@@ -1429,6 +1663,8 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
     }
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
     std::unique_lock<std::mutex> event_lock(event->mutex);
 
@@ -1451,9 +1687,12 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         if (wait & SCE_EVENT_WAITCLEAR_PAT) {
             event->flags &= ~flags;
         }
+        evf_record(event_id, thread_id, 2, flags, event->flags, 0);
 
         return SCE_KERNEL_OK;
     } else if (dowait) {
+        evf_record(event_id, thread_id, 3, flags, event->flags, static_cast<uint32_t>(wait));
+        thread->set_wait_reason("evf", event->uid, flags);
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -1493,6 +1732,224 @@ int eventflag_poll(KernelState &kernel, const char *export_name, SceUID thread_i
     return eventflag_waitorpoll(kernel, export_name, thread_id, event_id, flags, wait, outBits, 0, false);
 }
 
+int KernelState::try_break_provable_evf_cycle(bool dry_run) {
+    struct FlagInfo {
+        EventFlagPtr event;
+        std::set<SceUID> waiter_tids;
+        uint32_t wanted_union = 0;
+    };
+    std::unordered_map<SceUID, FlagInfo> flags;
+    std::unordered_map<SceUID, SceUID> thread_waits_on;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (const auto &[uid, event] : eventflags) {
+            const std::lock_guard<std::mutex> evlock(event->mutex);
+            if (event->waiting_threads->empty())
+                continue;
+            FlagInfo fi;
+            fi.event = event;
+            for (const auto &w : *event->waiting_threads) {
+                if (!w.thread)
+                    continue;
+                fi.waiter_tids.insert(w.thread->id);
+                fi.wanted_union |= w.flags;
+                thread_waits_on[w.thread->id] = uid;
+            }
+            flags.emplace(uid, std::move(fi));
+        }
+    }
+    if (flags.empty())
+        return 0;
+
+    std::unordered_map<SceUID, std::set<SceUID>> setters_snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(evf_setters_mutex);
+        setters_snapshot = evf_setters;
+    }
+
+    constexpr uint64_t PROVABLE_DEAD_STABLE_MS = 3000;
+    const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    int broken = 0;
+    std::set<SceUID> dead_now;
+    for (auto &[uid, fi] : flags) {
+        const auto st = setters_snapshot.find(uid);
+        bool all_setters_blocked_here = st != setters_snapshot.end() && !st->second.empty();
+        if (all_setters_blocked_here) {
+            for (const SceUID setter : st->second) {
+                const auto w = thread_waits_on.find(setter);
+                if (w == thread_waits_on.end() || !flags.count(w->second)) {
+                    all_setters_blocked_here = false;
+                    break;
+                }
+            }
+        }
+        if (!all_setters_blocked_here)
+            continue;
+        dead_now.insert(uid);
+        uint64_t dead_for_ms = 0;
+        {
+            const std::lock_guard<std::mutex> lock(evf_dead_since_mutex);
+            dead_for_ms = now_ms - evf_dead_since.try_emplace(uid, now_ms).first->second;
+        }
+        const bool stable = dead_for_ms >= PROVABLE_DEAD_STABLE_MS;
+        LOG_WARN("[EVFCYCLE]{} flag {} '{}' looks PROVABLY dead for {} ms: every historical setter is itself blocked on a flag with waiters - {} bits 0x{:X}",
+            dry_run ? " (DRY-RUN)" : "", uid, fi.event->name, dead_for_ms,
+            dry_run ? "would set" : (stable ? "setting" : "waiting for the verdict to hold before setting"), fi.wanted_union);
+        if (dry_run || !stable)
+            continue;
+        eventflag_set(*this, "provable_cycle_breaker", 0, uid, fi.wanted_union);
+        broken++;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(evf_dead_since_mutex);
+        std::erase_if(evf_dead_since, [&dead_now](const auto &entry) { return !dead_now.count(entry.first); });
+    }
+    return broken;
+}
+
+void KernelState::clear_evf_cycle_history() {
+    {
+        const std::lock_guard<std::mutex> lock(evf_setters_mutex);
+        evf_setters.clear();
+    }
+    const std::lock_guard<std::mutex> lock(evf_dead_since_mutex);
+    evf_dead_since.clear();
+}
+
+void KernelState::log_eventflag_history() {
+    std::vector<std::pair<SceUID, EventFlagPtr>> evsnap;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (const auto &[uid, event] : eventflags)
+            evsnap.emplace_back(uid, event);
+    }
+    for (const auto &[uid, event] : evsnap) {
+        if (!event)
+            continue;
+        std::unique_lock<std::mutex> evlock(event->mutex, std::try_to_lock);
+        if (!evlock.owns_lock())
+            continue;
+        if (event->waiting_threads->empty())
+            continue;
+        std::string waiters;
+        for (const auto &w : *event->waiting_threads)
+            waiters += fmt::format(" [tid={} wants=0x{:X} mode=0x{:X}]", w.thread ? w.thread->id : -1, w.flags, w.wait);
+        LOG_ERROR("HANG EVF: flag {} '{}' current=0x{:X} waiters:{}", uid, event->name, event->flags, waiters);
+    }
+    const uint64_t next = evf_ring_next.load(std::memory_order_relaxed);
+    const uint64_t count = std::min<uint64_t>(next, EVF_RING_SIZE);
+    static const char *op_names[] = { "SET", "CLEAR", "WAIT_OK", "WAIT_BLOCK", "CANCEL" };
+    std::string hist;
+    for (uint64_t k = next - count; k < next; k++) {
+        const EvfOp &e = evf_ring[k % EVF_RING_SIZE];
+        hist += fmt::format("{} ms={} evf={} tid={} bits=0x{:X} after=0x{:X} woken_or_mode={}\n",
+            op_names[e.op <= 4 ? e.op : 4], e.ms, e.evf, e.thread, e.bits, e.flags_after, e.woken);
+    }
+    LOG_ERROR("HANG EVF HISTORY ({} op(s), oldest first):\n{}", count, hist);
+}
+
+void KernelState::log_condvar_history() {
+    const uint64_t next = cond_ring_next.load(std::memory_order_relaxed);
+    const uint64_t count = std::min<uint64_t>(next, COND_RING_SIZE);
+    static const char *op_names[] = { "WAIT_BLOCK", "WAIT_DONE", "SIGNAL", "SIGNAL_TO_NOBODY" };
+    std::string hist;
+    uint32_t undelivered = 0;
+    for (uint64_t k = next - count; k < next; k++) {
+        const CondOp &c = cond_ring[k % COND_RING_SIZE];
+        if (c.op == 3)
+            undelivered++;
+        hist += fmt::format("{} ms={} cond={} tid={} waiters={} res=0x{:X}\n",
+            op_names[c.op <= 3 ? c.op : 3], c.ms, c.cond, c.thread, c.waiters, static_cast<uint32_t>(c.result));
+    }
+    LOG_ERROR("HANG COND HISTORY ({} op(s), {} delivered to nobody, oldest first):\n{}", count, undelivered, hist);
+}
+
+int KernelState::nudge_all_condvar_waiters() {
+    // Snapshot the condvars under the kernel lock, then wake outside it (matches the event-flag
+    // breaker's collect-then-act ordering so we never hold the kernel lock across a thread wake).
+    std::vector<CondvarPtr> targets;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[uid, c] : condvars)
+            if (c && c->waiting_threads && !c->waiting_threads->empty())
+                targets.push_back(c);
+        for (auto &[uid, c] : lwcondvars)
+            if (c && c->waiting_threads && !c->waiting_threads->empty())
+                targets.push_back(c);
+    }
+    int woken = 0;
+    std::string names;
+    for (const CondvarPtr &condvar : targets) {
+        const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
+        int here = 0;
+        while (!condvar->waiting_threads->empty()) {
+            const auto data = *condvar->waiting_threads->begin();
+            const auto t = data.thread;
+            const std::lock_guard<std::mutex> tl(t->mutex);
+            if (t->status == ThreadStatus::wait)
+                t->update_status(ThreadStatus::run, ThreadStatus::wait);
+            condvar->waiting_threads->pop();
+            ++here;
+        }
+        if (here) {
+            woken += here;
+            if (names.size() < 200)
+                names += fmt::format("{}#{}({}) ", condvar->uid == 0 ? "cond" : "cond", condvar->uid, here);
+        }
+    }
+    if (woken) {
+        static int logged = 0;
+        static std::chrono::steady_clock::time_point last_log{};
+        const auto now = std::chrono::steady_clock::now();
+        if (logged < 3 || now - last_log >= std::chrono::seconds(60)) {
+            ++logged;
+            last_log = now;
+            LOG_ERROR("HANG WATCHDOG: spurious-woke {} condvar waiter(s) to break a possible lost-signal stall: {}", woken, names);
+        }
+    }
+    return woken;
+}
+
+int KernelState::try_break_frame_sync_deadlock(std::vector<SceUID> &already_nudged) {
+    std::vector<std::pair<SceUID, SceUInt32>> nudges;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[uid, event] : eventflags) {
+            if (std::find(already_nudged.begin(), already_nudged.end(), uid) != already_nudged.end())
+                continue;
+            const std::lock_guard<std::mutex> ev_lock(event->mutex);
+            if (!event->waiting_threads || event->waiting_threads->size() == 0)
+                continue;
+            bool any_satisfiable = false;
+            SceUInt32 need = 0;
+            int best_prio = 0x7fffffff;
+            for (auto it = event->waiting_threads->begin(); it != event->waiting_threads->end(); ++it) {
+                const auto &w = *it;
+                const bool cond = (w.wait & SCE_EVENT_WAITOR)
+                    ? ((static_cast<SceUInt32>(event->flags) & static_cast<SceUInt32>(w.flags)) != 0)
+                    : ((static_cast<SceUInt32>(event->flags) & static_cast<SceUInt32>(w.flags)) == static_cast<SceUInt32>(w.flags));
+                if (cond) {
+                    any_satisfiable = true;
+                    break;
+                }
+                if (w.priority < best_prio) {
+                    best_prio = w.priority;
+                    need = static_cast<SceUInt32>(w.flags);
+                }
+            }
+            if (!any_satisfiable && need != 0)
+                nudges.emplace_back(uid, need);
+        }
+    }
+    for (const auto &[uid, bits] : nudges) {
+        LOG_WARN("DEADLOCK BREAKER: event flag {} has blocked waiter(s) with no satisfiable condition; setting bits {:#x} to break a frame-sync deadlock (once per flag per stall)", uid, bits);
+        already_nudged.push_back(uid);
+        eventflag_set(*this, "deadlock_breaker", 0, uid, bits);
+    }
+    return static_cast<int>(nudges.size());
+}
+
 SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID evfId, SceUInt32 bitPattern) {
     assert(evfId >= 0);
 
@@ -1509,43 +1966,54 @@ SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thre
             event->waiting_threads->size());
     }
 
-    const std::lock_guard<std::mutex> event_lock(event->mutex);
-    event->flags |= bitPattern;
+    uint32_t woken_count = 0;
+    int best_woken_prio = 0x7fffffff; // lowest numeric priority woken = highest priority (preempt-on-wake)
+    {
+        const std::lock_guard<std::mutex> event_lock(event->mutex);
+        event->flags |= bitPattern;
 
-    for (auto it = event->waiting_threads->begin(); it != event->waiting_threads->end();) {
-        const auto waiting_thread_data = *it;
-        const auto waiting_thread = waiting_thread_data.thread;
-        const auto waiting_flags = waiting_thread_data.flags;
+        for (auto it = event->waiting_threads->begin(); it != event->waiting_threads->end();) {
+            const auto waiting_thread_data = *it;
+            const auto waiting_thread = waiting_thread_data.thread;
+            const auto waiting_flags = waiting_thread_data.flags;
 
-        bool condition;
-        if (waiting_thread_data.wait & SCE_EVENT_WAITOR) {
-            condition = event->flags & waiting_flags;
-        } else {
-            condition = (event->flags & waiting_flags) == waiting_flags;
+            bool condition;
+            if (waiting_thread_data.wait & SCE_EVENT_WAITOR) {
+                condition = event->flags & waiting_flags;
+            } else {
+                condition = (event->flags & waiting_flags) == waiting_flags;
+            }
+
+            if (condition) {
+                if (waiting_thread_data.outBits) {
+                    *waiting_thread_data.outBits = event->flags;
+                }
+
+                if (waiting_thread_data.wait & SCE_EVENT_WAITCLEAR) {
+                    event->flags = 0;
+                }
+
+                if (waiting_thread_data.wait & SCE_EVENT_WAITCLEAR_PAT) {
+                    event->flags &= ~waiting_flags;
+                }
+
+                const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+
+                waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                if (waiting_thread->priority < best_woken_prio)
+                    best_woken_prio = waiting_thread->priority;
+                woken_count++;
+
+                event->waiting_threads->erase(it++);
+            } else {
+                ++it;
+            }
         }
-
-        if (condition) {
-            if (waiting_thread_data.outBits) {
-                *waiting_thread_data.outBits = event->flags;
-            }
-
-            if (waiting_thread_data.wait & SCE_EVENT_WAITCLEAR) {
-                event->flags = 0;
-            }
-
-            if (waiting_thread_data.wait & SCE_EVENT_WAITCLEAR_PAT) {
-                event->flags &= ~waiting_flags;
-            }
-
-            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-
-            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-
-            event->waiting_threads->erase(it++);
-        } else {
-            ++it;
-        }
+        evf_record(evfId, thread_id, 0, bitPattern, event->flags, woken_count);
     }
+
+    if (kernel.preempt_on_wake && woken_count > 0)
+        preempt_after_wake(kernel, thread_id, best_woken_prio);
 
     return 0;
 }
@@ -1700,19 +2168,29 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
     };
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     std::unique_lock msgpipe_lock(msgpipe->mutex);
     // check in case of delete happens while waiting (un)lock
     if (msgpipe->beingDeleted) {
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
     }
 
+    const auto wake_up = [&](const ThreadStatePtr &target) {
+        if (target == thread) {
+            target->update_status(ThreadStatus::run); // our own mutex is already held
+        } else {
+            const std::lock_guard<std::mutex> target_lock(target->mutex);
+            target->update_status(ThreadStatus::run);
+        }
+    };
+
     const auto wakeup_senders = [&] {
         if (!msgpipe->senders->empty()) {
             for (auto it = msgpipe->senders->begin(); it != msgpipe->senders->end(); ++it) {
                 auto threadInfo = (*it);
                 if (threadInfo.mp.request_size <= msgpipe->data_buffer.Free()) { // Found a thread we can service
-                    threadInfo.thread->status = ThreadStatus::run;
-                    threadInfo.thread->status_cond.notify_one();
+                    wake_up(threadInfo.thread);
 
                     msgpipe->senders->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1759,27 +2237,47 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                     std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                     return SCE_KERNEL_ERROR_WAIT_DELETE;
                 }
+                thread_lock.unlock();
                 msgpipe_lock.lock(); // Lock message pipe again
+                thread_lock.lock();
                 availableSize = msgpipe->data_buffer.Used();
+                if (!((availableSize >= recvSize) || (ASAP && (availableSize > 0)))) {
+                    if (thread->is_delete_requested()) {
+                        auto it = msgpipe->receivers->find(thread);
+                        if (it != msgpipe->receivers->end())
+                            msgpipe->receivers->erase(it);
+                        return 0;
+                    }
+                    if (msgpipe->receivers->find(thread) == msgpipe->receivers->end())
+                        msgpipe->receivers->push(wait_data);
+                    thread->update_status(ThreadStatus::wait, ThreadStatus::run);
+                }
             } while (!((availableSize >= recvSize) || (ASAP && (availableSize > 0))));
 
             return finish();
         } else { // There's a timeout - wait until we can fill buffer or timeout
             msgpipe_lock.unlock(); // Unlock message pipe object, else we'll deadlock
-            auto status = thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
-                return thread->status == ThreadStatus::run;
-            });
+            thread->wait_for_run_precise(thread_lock, static_cast<int64_t>(*pTimeout));
             if (msgpipe->beingDeleted) {
                 std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                 return SCE_KERNEL_ERROR_WAIT_DELETE;
             }
 
-            if (!status) { // Timed out and buffer hasn't been touched
-                thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-                return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+            thread_lock.unlock();
+            msgpipe_lock.lock();
+            thread_lock.lock();
+
+            availableSize = msgpipe->data_buffer.Used();
+            if ((availableSize >= recvSize) || (ASAP && (availableSize > 0)))
+                return finish();
+
+            {
+                auto it = msgpipe->receivers->find(thread);
+                if (it != msgpipe->receivers->end())
+                    msgpipe->receivers->erase(it);
             }
-            msgpipe_lock.lock(); // Lock message pipe again
-            return finish();
+            thread->update_status(ThreadStatus::run);
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
         }
     }
 }
@@ -1805,11 +2303,24 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
     if (sendSize > msgpipe->data_buffer.Capacity())
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_SIZE);
 
+    const ThreadStatePtr thread = kernel.get_thread(thread_id);
+    if (!thread) // the thread is being torn down so fail its last import instead of crashing the process
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+
+    const auto wake_up = [&](const ThreadStatePtr &target) {
+        if (target == thread) {
+            target->update_status(ThreadStatus::run); // our own mutex is already held
+        } else {
+            const std::lock_guard<std::mutex> target_lock(target->mutex);
+            target->update_status(ThreadStatus::run);
+        }
+    };
+
     const auto wakeup_receivers = [&] { // TODO is this correct?
         if (!msgpipe->receivers->empty()) {
             for (auto it = msgpipe->receivers->begin(); it != msgpipe->receivers->end(); ++it) {
                 if ((*it).mp.request_size <= msgpipe->data_buffer.Used()) { // Found a thread we can service
-                    (*it).thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                    wake_up((*it).thread);
 
                     msgpipe->receivers->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1817,8 +2328,6 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
             }
         }
     };
-
-    const ThreadStatePtr thread = kernel.get_thread(thread_id);
     std::unique_lock<std::mutex> msgpipe_lock(msgpipe->mutex);
     // check in case of delete happens while waiting (un)lock
     if (msgpipe->beingDeleted) {
@@ -1866,28 +2375,48 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                     std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                     return SCE_KERNEL_ERROR_WAIT_DELETE;
                 }
+                thread_lock.unlock();
                 msgpipe_lock.lock(); // Lock message pipe before read from data_buffer
+                thread_lock.lock();
                 freeSize = msgpipe->data_buffer.Free();
+                if (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1)))) {
+                    if (thread->is_delete_requested()) {
+                        auto it = msgpipe->senders->find(thread);
+                        if (it != msgpipe->senders->end())
+                            msgpipe->senders->erase(it);
+                        return 0;
+                    }
+                    if (msgpipe->senders->find(thread) == msgpipe->senders->end())
+                        msgpipe->senders->push(wait_data);
+                    thread->update_status(ThreadStatus::wait, ThreadStatus::run);
+                }
             } while (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1))));
 
             // Message pipe is still locked here, so we can read from data_buffer in finish()
             return finish();
         } else { // There's a timeout - wait until we can fill buffer or timeout
             msgpipe_lock.unlock(); // Unlock message pipe object, else we'll deadlock
-            auto status = thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
-                return thread->status == ThreadStatus::run;
-            });
+            thread->wait_for_run_precise(thread_lock, static_cast<int64_t>(*pTimeout));
             if (msgpipe->beingDeleted) {
                 std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                 return SCE_KERNEL_ERROR_WAIT_DELETE;
             }
 
-            if (!status) { // Timed out and buffer hasn't been touched
-                thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-                return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+            thread_lock.unlock();
+            msgpipe_lock.lock();
+            thread_lock.lock();
+
+            freeSize = msgpipe->data_buffer.Free();
+            if ((freeSize >= sendSize) || (ASAP && (freeSize >= 1)))
+                return finish();
+
+            {
+                auto it = msgpipe->senders->find(thread);
+                if (it != msgpipe->senders->end())
+                    msgpipe->senders->erase(it);
             }
-            msgpipe_lock.lock(); // Lock message pipe before read from data_buffer in finish()
-            return finish();
+            thread->update_status(ThreadStatus::run);
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
         }
     }
 }

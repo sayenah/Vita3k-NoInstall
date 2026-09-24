@@ -15,6 +15,9 @@ add_library(
 
 target_include_directories(mem PUBLIC include)
 target_link_libraries(mem PUBLIC util)
+if(WIN32)
+	target_link_libraries(mem PRIVATE Zydis::Zydis)
+endif()
 
 if(NOT ANDROID)
 	add_executable(

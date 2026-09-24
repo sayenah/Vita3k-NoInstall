@@ -283,14 +283,8 @@ static constexpr vk::ComponentMapping swizzle_gba1 = { Swizzle::eG, Swizzle::eB,
 
 namespace color {
 
-static vk::ComponentMapping translate_swizzle1(SceGxmColorSwizzle1Mode mode) {
-    switch (mode) {
-    case SCE_GXM_COLOR_SWIZZLE1_R:
-        return swizzle_r001;
-    default:
-        LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
-        return swizzle_identity;
-    }
+static vk::ComponentMapping translate_swizzle1(SceGxmColorFormat format) {
+    return swizzle_r001;
 }
 
 static vk::ComponentMapping translate_swizzle2(SceGxmColorSwizzle2Mode mode) {
@@ -373,7 +367,7 @@ vk::ComponentMapping translate_swizzle(SceGxmColorFormat format) {
     case SCE_GXM_COLOR_BASE_FORMAT_S16:
     case SCE_GXM_COLOR_BASE_FORMAT_F16:
     case SCE_GXM_COLOR_BASE_FORMAT_F32:
-        return translate_swizzle1(static_cast<SceGxmColorSwizzle1Mode>(swizzle));
+        return translate_swizzle1(format);
 
     case SCE_GXM_COLOR_BASE_FORMAT_U8U8:
     case SCE_GXM_COLOR_BASE_FORMAT_S8S8:
@@ -453,7 +447,8 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
     case SCE_GXM_COLOR_BASE_FORMAT_F11F11F10:
         return vk::Format::eB10G11R11UfloatPack32;
     case SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9:
-        return vk::Format::eE5B9G9R9UfloatPack32;
+        // RGB9E5 is sample only on desktop GPUs (color writes silently dropped) so emulate like U2F10F10F10
+        return vk::Format::eR16G16B16A16Sfloat;
     case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8:
         // 24 bit packed RGB is not supported (on many GPUs), use rgba8 instead
         return vk::Format::eR8G8B8A8Unorm;
@@ -475,6 +470,13 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
         LOG_ERROR("Unknown format {}", log_hex(format));
         return {};
     }
+}
+
+vk::Format translate_surface_format(SceGxmColorBaseFormat base_format) {
+    if (base_format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4)
+        return vk::Format::eR8G8B8A8Unorm;
+
+    return translate_format(base_format);
 }
 } // namespace color
 

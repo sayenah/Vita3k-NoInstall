@@ -387,9 +387,10 @@ bool USSETranslatorVisitor::vdp(
     return true;
 }
 
-spv::Id USSETranslatorVisitor::do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask) {
-    spv::Id vsrc1 = load(inst.opr.src1, source_mask, 0);
-    spv::Id vsrc2 = load(inst.opr.src2, source_mask, 0);
+spv::Id USSETranslatorVisitor::do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask,
+    int src1_repeat_offset, int src2_repeat_offset) {
+    spv::Id vsrc1 = load(inst.opr.src1, source_mask, src1_repeat_offset);
+    spv::Id vsrc2 = load(inst.opr.src2, source_mask, src2_repeat_offset);
     std::vector<spv::Id> ids;
     ids.push_back(vsrc1);
 
@@ -602,16 +603,26 @@ bool USSETranslatorVisitor::v32nmad(
 
     ExtPredicate pred_translated = ext_vec_predicate_to_ext(pred);
 
-    LOG_DISASM("{:016x}: {}{} {} {} {}", m_instr, disasm::e_predicate_str(pred_translated), disasm::opcode_str(opcode), disasm::operand_to_str(inst.opr.dest, dest_mask),
-        disasm::operand_to_str(inst.opr.src1, source_mask), disasm::operand_to_str(inst.opr.src2, source_mask));
-
     // Recompile
     m_b.setDebugSourceLocation(m_recompiler.cur_pc, nullptr);
-    spv::Id result = do_alu_op(inst, source_mask, dest_mask);
+
+    set_repeat_multiplier(2, 2, 2, 2);
+
+    // VNMAD carries no repeat count but repeat slot 0 still holds the SMLSI/SMBO offset
+    BEGIN_REPEAT(0)
+    GET_REPEAT(inst, RepeatMode::SLMSI);
+
+    LOG_DISASM("{:016x}: {}{} {} {} {}", m_instr, disasm::e_predicate_str(pred_translated), disasm::opcode_str(opcode), disasm::operand_to_str(inst.opr.dest, dest_mask, dest_repeat_offset),
+        disasm::operand_to_str(inst.opr.src1, source_mask, src1_repeat_offset), disasm::operand_to_str(inst.opr.src2, source_mask, src2_repeat_offset));
+
+    spv::Id result = do_alu_op(inst, source_mask, dest_mask, src1_repeat_offset, src2_repeat_offset);
 
     if (result != spv::NoResult) {
-        store(inst.opr.dest, result, dest_mask, 0);
+        store(inst.opr.dest, result, dest_mask, dest_repeat_offset);
     }
+    END_REPEAT()
+
+    reset_repeat_multiplier();
 
     return true;
 }
@@ -758,16 +769,16 @@ bool USSETranslatorVisitor::vcomp(
     }
 
     case Opcode::VLOG: {
-        // src0 = e^y => return y
-        result = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Log, { result });
+        // src0 = 2^y => return y (USSE complex unit is base-2)
+        result = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Log2, { result });
         break;
     }
 
     case Opcode::VEXP: {
-        // y = e^src0 => return y
+        // y = 2^src0 => return y (USSE complex unit is base-2)
         // hack (kind of) :
         // define exp(Nan) as 1.0, this is needed for Freedom Wars to render properly
-        const spv::Id exp_val = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Exp, { result });
+        const spv::Id exp_val = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Exp2, { result });
         const spv::Id ones = utils::make_uniform_vector_from_type(m_b, m_b.getTypeId(result), 1.0f);
         const spv::Id is_nan = m_b.createUnaryOp(spv::OpIsNan, m_b.makeBoolType(), result);
         result = m_b.createTriOp(spv::OpSelect, m_b.getTypeId(result), is_nan, ones, exp_val);
@@ -1216,10 +1227,10 @@ bool shader::usse::USSETranslatorVisitor::sop2m(Imm2 pred,
     if (wmask & 0b1000) {
         // Alpha is written, so calculate and also store
         const spv::Id alpha_index = m_b.makeIntConstant(3);
-        spv::Id a1 = m_b.createBinOp(spv::OpVectorExtractDynamic, alpha_type, operation_1, alpha_index);
-        spv::Id a2 = m_b.createBinOp(spv::OpVectorExtractDynamic, alpha_type, operation_2, alpha_index);
+        spv::Id a1 = utils::extract_vector_component(m_b, alpha_type, operation_1, alpha_index);
+        spv::Id a2 = utils::extract_vector_component(m_b, alpha_type, operation_2, alpha_index);
 
-        result = m_b.createTriOp(spv::OpVectorInsertDynamic, src_type, result, apply_opcode(alpha_op, alpha_type, a1, a2), alpha_index);
+        result = utils::insert_vector_component(m_b, src_type, result, apply_opcode(alpha_op, alpha_type, a1, a2), alpha_index);
     }
 
     result = utils::convert_to_int(m_b, m_util_funcs, result, DataType::UINT8, true);
@@ -1860,12 +1871,13 @@ bool USSETranslatorVisitor::vdual(
             const spv::Id second = load(ops[1], write_mask_source);
             const spv::Op op = (m_b.getNumComponents(first) > 1) ? spv::OpDot : spv::OpFMul;
             result = m_b.createBinOp(op, type_f32, first, second);
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
             break;
         }
         case Opcode::FEXP: {
             // hack: set exp(nan) = 1.0 (see VEXP)
             const spv::Id source = load(ops[0], write_mask_source);
-            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Exp, { source });
+            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Exp2, { source });
             const int num_comp = m_b.getNumComponents(source);
             const spv::Id ones = utils::make_uniform_vector_from_type(m_b, m_b.getTypeId(result), 1.0f);
             const spv::Id is_nan = m_b.createUnaryOp(spv::OpIsNan, utils::make_vector_or_scalar_type(m_b, m_b.makeBoolType(), num_comp), result);
@@ -1874,13 +1886,14 @@ bool USSETranslatorVisitor::vdual(
         }
         case Opcode::FLOG: {
             const spv::Id source = load(ops[0], write_mask_source);
-            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Log, { source });
+            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Log2, { source });
             break;
         }
         case Opcode::VSSQ: {
             const spv::Id source = load(ops[0], write_mask_source);
             const spv::Op op = (m_b.getNumComponents(source) > 1) ? spv::OpDot : spv::OpFMul;
             result = m_b.createBinOp(op, type_f32, source, source);
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
             break;
         }
         case Opcode::FMAD:
@@ -1912,6 +1925,14 @@ bool USSETranslatorVisitor::vdual(
         default:
             LOG_ERROR("Missing implementation for DUAL {}.", disasm::opcode_str(code));
             return spv::NoResult;
+        }
+
+        // Scalar-result ops (FRSQ/FRCP/FEXP/FLOG/FMUL/...) can target a multi-component
+        // destination mask (e.g. FRSQ i0.xyz i0.x): the hardware replicates the scalar into
+        // every masked component. Broadcast like the VDP/VSSQ postprocess and the vcomp
+        // handler do, otherwise store() writes only the first masked component.
+        if (result != spv::NoResult && m_b.getNumComponents(result) == 1) {
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
         }
 
         disasm_str += fmt::format("{} {}", disasm::opcode_str(code), disasm::operand_to_str(dest, write_mask_dest));
