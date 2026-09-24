@@ -36,8 +36,8 @@ like — internal storage, SD card, a NAS folder — and just press play.
 | 🔓 **2. It unpacks to a private temp folder** | Decrypted on the fly (updates merged in, DLC attached, licenses applied — see below). |
 | 🎮 **3. It boots from a read-only mount** | The game sees a normal `app0:`; every write attempt is safely refused. **When you quit, the temp folder is deleted.** Nothing is ever installed. |
 
-Your **saves, trophies, and licenses live in the normal Vita3K data folder** the whole time — moving
-or deleting a game file never touches them.
+Your **saves, trophies, and licenses live in the app's own data folder** (`Vita3kPlus-Noinstall`) the
+whole time — moving or deleting a game file never touches them.
 
 ## Features
 
@@ -55,8 +55,12 @@ or deleting a game file never touches them.
   game/update/DLC key is applied automatically.
 - 🔄 **Self-updating** — every Monday the fork rebases itself onto the newest official Vita3K and
   publishes a fresh build. There's also a one-click button ([how-to](./docs/game-bundle/getting-builds.md)).
-- 🖥️ **All Vita3K goodness** — this fork *adds* features; normal installs, settings, save data, and
-  compatibility are exactly upstream Vita3K.
+- 🛠️ **Vita3K-Plus game fixes** — includes the compatibility and rendering fixes from
+  [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus) (Dead or Alive 5 Plus, Metal Gear Solid 3,
+  Killzone, Resistance, LittleBigPlanet, Tearaway and more), plus its Accurate Thread Scheduling setting.
+- 📦 **Its own app** — installs alongside official Vita3K instead of replacing it (Android app id
+  `io.github.sayenah.vita3knoinstall`), with its own data folder and its own update checks. Normal
+  installs and settings still work exactly like Vita3K.
 
 ## Quick start
 

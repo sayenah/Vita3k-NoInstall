@@ -365,10 +365,11 @@ bool init_paths(Root &root_paths) {
             root_paths.set_log_path(fs::path(home_path) / ".cache" / app_name / "");
         }
 
-        const constexpr char *static_asset_paths[] = {
-            "/usr/local/share/Vita3K",
-            "/usr/share/Vita3K",
-            "/app/share/Vita3K",
+        // Packaging installs assets under share/<app_name> (see vita3k/CMakeLists.txt)
+        const std::string static_asset_paths[] = {
+            std::string("/usr/local/share/") + app_name,
+            std::string("/usr/share/") + app_name,
+            std::string("/app/share/") + app_name,
         };
 
         // Check both normal case and all lowercase paths
@@ -388,8 +389,8 @@ bool init_paths(Root &root_paths) {
             root_paths.set_static_assets_path(exe_path);
 
         // AppImage root
-        if (APPDIR != NULL && fs::exists(fs::path(APPDIR) / "usr/share/Vita3K"))
-            root_paths.set_static_assets_path(fs::path(APPDIR) / "usr/share/Vita3K");
+        if (APPDIR != NULL && fs::exists(fs::path(APPDIR) / "usr/share" / app_name))
+            root_paths.set_static_assets_path(fs::path(APPDIR) / "usr/share" / app_name);
 
         // shared path
         if (XDG_DATA_HOME != NULL)

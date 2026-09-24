@@ -417,19 +417,30 @@ jobs:
           fi
           ls -la out
 
+      # The in-app update check (desktop and Android) reads "Vita3K Build: <n>" from the release notes
+      # and compares it with the app's own build number, which is the commit count of the built tree.
+      - name: Checkout (for the build number)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          path: src
+
       - name: Publish/refresh the "latest" release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHA="${{ github.sha }}"
+          BUILD=$(git -C src rev-list --count "$SHA")
           if [ -z "$(ls -A out 2>/dev/null)" ]; then
             echo "::warning::no Android/Windows artifacts on this build run -- nothing to publish, leaving the existing release in place"
             exit 0
           fi
           gh release delete latest -R "${{ github.repository }}" --yes --cleanup-tag || true
           gh release create latest -R "${{ github.repository }}" out/* \
-            --title "Latest Vita3K-NoInstall build" \
+            --title "Vita3K NoInstall build ${BUILD}" \
             --notes "Automatically built from commit \`${SHA}\`.
+
+          Vita3K Build: ${BUILD}
 
           - **Android:** download \`Vita3K-NoInstall.apk\` and install it (allow installing from your browser/files app).
           - **Windows:** download \`Vita3K-NoInstall-windows-x64.zip\`, unzip, and run \`bin/Vita3K.exe\`."
