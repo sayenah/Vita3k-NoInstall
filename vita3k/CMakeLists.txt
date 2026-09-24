@@ -1,12 +1,12 @@
 set(VITA3K_ORG_NAME "Vita3K")
-# APP_NAME is the on-disk data folder name, keep it: DISPLAY_NAME is what the user sees
-set(VITA3K_APP_NAME "Vita3K")
-set(VITA3K_APP_ID "org.vita3k.vita3k")
+# APP_NAME is the on-disk data folder name; DISPLAY_NAME is what the user sees
+set(VITA3K_APP_NAME "Vita3kPlus-Noinstall")
+set(VITA3K_APP_ID "io.github.sayenah.vita3knoinstall")
 set(VITA3K_APP_VER_HI 0)
 set(VITA3K_APP_VER_MID 2)
 set(VITA3K_APP_VER_LO 1)
 set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}.${VITA3K_APP_VER_LO}")
-set(VITA3K_DISPLAY_NAME "Vita3K")
+set(VITA3K_DISPLAY_NAME "Vita3K NoInstall")
 
 execute_process(
 	COMMAND git rev-list HEAD --count
@@ -57,7 +57,8 @@ endif()
 if(GIT_HASH STREQUAL "")
 	set(VITA3K_GIT_REV "Development version")
 	set(GIT_COUNT 0)
-elseif((GIT_REPO STREQUAL "Vita3K") AND ((GIT_BRANCH STREQUAL "master") OR (GIT_BRANCH STREQUAL "HEAD")))
+# Builds of this fork's main branch are the "official" ones its updater offers (GIT_REPO is the repo owner)
+elseif((GIT_REPO STREQUAL "sayenah") AND ((GIT_BRANCH STREQUAL "feature/game-bundle") OR (GIT_BRANCH STREQUAL "HEAD")))
 	set(VITA3K_GIT_REV "${GIT_HASH}")
 	set(VITA3K_OFFICIAL_UPDATE_BUILD 1)
 else()
@@ -338,7 +339,7 @@ elseif(LINUX)
 			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/data" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/"
 			COMMAND ${CMAKE_COMMAND} -E copy_directory "${VITA3K_QT_QM_DIR}" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/translations"
 			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/shaders-builtin" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/shaders-builtin"
-			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/icons" "${APPDIR}/usr/share/VITA3K_APP_NAME/icons"
+			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/icons" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/icons"
 			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/COPYING.txt" "${APPDIR}/usr/share/licenses/${VITA3K_APP_NAME}/"
 			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/README.md" "${APPDIR}/usr/share/doc/${VITA3K_APP_NAME}/"
 			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml" "${APPDIR}/usr/share/metainfo/"
