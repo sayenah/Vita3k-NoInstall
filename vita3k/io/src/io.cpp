@@ -384,7 +384,10 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
                 return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
             const auto normalized_path = device::construct_normalized_path(device, translated_path);
             const auto fd = io.next_fd++;
-            io.std_files.emplace(fd, FileStats{ path, normalized_path, std::move(reader) });
+            {
+                const std::lock_guard<std::mutex> lock(io.file_mutex);
+                io.std_files.emplace(fd, FileStats{ path, normalized_path, std::move(reader) });
+            }
             LOG_TRACE_IF(log_file_op, "{}: Opening bundle file {} ({} -> {}), fd: {}", export_name, path, translated_path, *key, log_hex(fd));
             return fd;
         }
