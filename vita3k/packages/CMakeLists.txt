@@ -7,6 +7,7 @@ add_library(packages STATIC
             src/pup.cpp
             src/sce_utils.cpp
             src/sfo.cpp
+            src/validation.cpp
             src/vci.cpp
             include/packages/archive_7z.h
             include/packages/archive_read.h
@@ -16,6 +17,7 @@ add_library(packages STATIC
             include/packages/pkg.h
             include/packages/sce_types.h
             include/packages/sfo.h
+            include/packages/validation.h
             include/packages/vci.h
 )
 target_include_directories(packages PUBLIC include)
