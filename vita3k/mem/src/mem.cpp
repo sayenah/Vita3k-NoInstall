@@ -193,7 +193,7 @@ bool debug_safe_copy_guest(const MemState &state, Address addr, void *dst, uint3
         return false;
     if (!is_valid_addr_range(state, addr, addr + size))
         return false;
-#ifdef _WIN32
+#ifdef _MSC_VER // SEH; MinGW/clang Windows builds take the unguarded path
     __try {
         debug_copy_by_page(state, addr, static_cast<uint8_t *>(dst), nullptr, size, false);
         return true;
@@ -211,7 +211,7 @@ bool debug_safe_write_guest(MemState &state, Address addr, const void *src, uint
         return false;
     if (!is_valid_addr_range(state, addr, addr + size))
         return false;
-#ifdef _WIN32
+#ifdef _MSC_VER
     __try {
         debug_copy_by_page(state, addr, nullptr, static_cast<const uint8_t *>(src), size, true);
         return true;
