@@ -30,6 +30,22 @@ branch, rebases, and resyncs submodules. If it hits a conflict it stops and
 prints the exact commands to finish (resolve → `git add` → `git rebase --continue`).
 To undo everything: `git branch -f feature/game-bundle backup/pre-update-…`.
 
+## Pulling in new Vita3K-Plus enhancements
+
+The fork also carries the fixes from [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus)
+(its `all-enhancements` branch). `.github/vita3k-plus.ref` records the last Plus commit
+imported; the daily workflow imports anything newer on its own. To do it by hand:
+
+```bash
+tools/import-vita3k-plus.sh                # up to Plus's all-enhancements
+```
+
+It cherry-picks the new Plus commits (skipping merges and anything upstream Vita3K already
+has) and squashes them into one `Import Vita3K-Plus enhancements up to <sha>` commit that
+also advances the ref file; Plus's own `.github/` CI is left out. On a conflict it stops:
+fix the files, `git add` them, `git cherry-pick --continue`, then
+`tools/import-vita3k-plus.sh --finish`. `--abort` puts the branch back as it was.
+
 ## Build + collect the installers
 
 ```bash
