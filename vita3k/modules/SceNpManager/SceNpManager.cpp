@@ -72,8 +72,27 @@ EXPORT(int, sceNpCheckCallback) {
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     const SceNpServiceState state = emuenv.cfg.current_config.psn_signed_in ? SCE_NP_SERVICE_STATE_SIGNED_IN : SCE_NP_SERVICE_STATE_SIGNED_OUT;
     for (auto &[_, np_callback] : emuenv.np.cbs) {
+        if (np_callback.delivered && np_callback.last_state == static_cast<uint32_t>(state))
+            continue;
+        np_callback.delivered = true;
+        np_callback.last_state = static_cast<uint32_t>(state);
         thread->run_callback(np_callback.pc, { static_cast<uint32_t>(state), 0, np_callback.data });
     }
+
+    std::vector<SceNpMatching2ContextEvent> events;
+    Address context_cb_pc = 0;
+    Address context_cb_arg = 0;
+    {
+        NpMatching2State &matching2 = emuenv.np.matching2;
+        std::lock_guard<std::mutex> lock(matching2.mutex);
+        if (matching2.context_cb_pc && !matching2.pending.empty()) {
+            events.swap(matching2.pending);
+            context_cb_pc = matching2.context_cb_pc;
+            context_cb_arg = matching2.context_cb_arg;
+        }
+    }
+    for (const SceNpMatching2ContextEvent &event : events)
+        thread->run_callback(context_cb_pc, { event.ctx_id, event.event, event.cause, event.error_code, context_cb_arg });
 
     return STUBBED("Stub");
 }

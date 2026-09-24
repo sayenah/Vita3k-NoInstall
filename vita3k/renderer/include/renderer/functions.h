@@ -20,6 +20,8 @@
 #include <renderer/commands.h>
 #include <renderer/types.h>
 
+#include <functional>
+#include <memory>
 #include <string>
 
 struct MemState;
@@ -37,11 +39,13 @@ struct State;
 struct VertexProgram;
 struct YUVConversionCache;
 
-bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map);
+bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map, SceGxmOutputRegisterFormat output_format = SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED, SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE);
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
 void create(SceGxmSyncObject *sync, State &state);
-void destroy(SceGxmSyncObject *sync, State &state);
+void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc = nullptr);
 void finish(State &state, Context *context);
+
+bool has_dormant_mappings();
 
 enum class SyncWaitResult {
     Ready,
@@ -63,6 +67,9 @@ SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp,
  */
 void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp);
 
+inline constexpr bool recover_from_abandoned_lists = true;
+bool signal_may_be_lost(State &state, int64_t wait_start_epoch_ms);
+
 int wait_for_status(State &state, int *status, int signal, bool wake_on_equal);
 void reset_command_list(CommandList &command_list);
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list);
@@ -80,7 +87,7 @@ void set_point_line_width(State &state, Context *ctx, bool is_front, unsigned in
 void set_polygon_mode(State &state, Context *ctx, bool is_front, SceGxmPolygonMode mode);
 void set_stencil_func(State &state, Context *ctx, bool is_front, SceGxmStencilFunc func, SceGxmStencilOp stencilFail, SceGxmStencilOp depthFail, SceGxmStencilOp depthPass, unsigned char compareMask, unsigned char writeMask);
 void set_stencil_ref(State &state, Context *ctx, bool is_front, unsigned char sref);
-void set_program(State &state, Context *ctx, Ptr<const void> program, const bool is_fragment);
+void set_program(State &state, Context *ctx, Ptr<const void> program, const std::shared_ptr<ProgramBinding> &binding, bool is_fragment);
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull);
 void set_texture(State &state, Context *ctx, const std::uint32_t tex_index, const SceGxmTexture tex);
 void set_viewport_real(State &state, Context *ctx, float xOffset, float yOffset, float zOffset, float xScale, float yScale, float zScale);
@@ -140,14 +147,15 @@ bool add_state_set_command(Context *ctx, const GXMState state, Args... arguments
 
 template <typename... Args>
 int send_single_command(State &state, Context *ctx, const CommandOpcode opcode, bool wait, Args... arguments) {
-    // Make a temporary command list
-    int status = CommandErrorCodePending; // Pending.
+    auto status = std::make_shared<int>(CommandErrorCodePending); // Pending.
     auto cmd = make_command(ctx ? ctx->alloc_func : generic_command_allocate, ctx ? ctx->free_func : generic_command_free,
-        opcode, wait ? &status : nullptr, arguments...);
+        opcode, wait ? status.get() : nullptr, arguments...);
 
     if (!cmd) {
         return CommandErrorArgumentsTooLarge;
     }
+    if (wait)
+        cmd->status_keepalive = status;
 
     CommandList list;
     list.first = cmd;
@@ -156,7 +164,7 @@ int send_single_command(State &state, Context *ctx, const CommandOpcode opcode, 
     // Submit it
     submit_command_list(state, ctx, list);
     if (wait)
-        return wait_for_status(state, &status, CommandErrorCodePending, false);
+        return wait_for_status(state, status.get(), CommandErrorCodePending, false);
     else
         return 0;
 }

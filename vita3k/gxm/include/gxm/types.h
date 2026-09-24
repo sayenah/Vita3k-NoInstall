@@ -1225,6 +1225,9 @@ struct SceGxmTexture {
         uint32_t count = (mip_count + 1) & 15;
         return (count == 0) ? 1 : count; // 0 count is no mip chain, but there's still top level...
     }
+    uint32_t true_lod_min() const {
+        return (lod_min0 << 2) | lod_min1;
+    }
 };
 
 static_assert(sizeof(SceGxmTexture) == 16);
@@ -1352,6 +1355,7 @@ enum SceGxmFragmentProgramInputs : int {
 enum SceGxmProgramFlags : uint32_t {
     SCE_GXM_PROGRAM_FLAG_FRAGMENT = 1 << 0,
     SCE_GXM_PROGRAM_FLAG_PER_INSTANCE_MODE = 1 << 1,
+    SCE_GXM_PROGRAM_FLAG_OUTPUT_IN_DECLARED_FORMAT = 1 << 2,
     SCE_GXM_PROGRAM_FLAG_DISCARD_USED = 1 << 3,
     SCE_GXM_PROGRAM_FLAG_DEPTH_USED = 1 << 4,
     SCE_GXM_PROGRAM_FLAG_SPRITECOORD_USED = 1 << 5,
@@ -1467,6 +1471,9 @@ struct SceGxmProgram {
     }
     bool is_native_color() const {
         return (program_flags & SCE_GXM_PROGRAM_FLAG_NATIVECOLOR_USED);
+    }
+    bool writes_output_in_declared_format() const {
+        return (program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_IN_DECLARED_FORMAT);
     }
     bool is_frag_color_used() const {
         return (program_flags & SCE_GXM_PROGRAM_FLAG_FRAGCOLOR_USED);

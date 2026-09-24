@@ -19,6 +19,7 @@
 
 #include <ime/types.h>
 
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -45,21 +46,34 @@ struct Ime {
 
     bool state = false;
     SceImeEditText edit_text;
+    SceImeRect preedit_rect{}; // seq-256: reported with SCE_IME_EVENT_CHANGE_SIZE
     SceImeParam param;
     std::string enter_label;
     std::u16string str;
     uint32_t caps_level = 0;
     uint32_t caretIndex = 0;
-    uint32_t event_id = SCE_IME_EVENT_OPEN;
+    // The real sceImeUpdate is a pump and it dispatches every event queued since the last call
+    std::deque<uint32_t> events;
+
+    void push_event(uint32_t id) {
+        if ((id == SCE_IME_EVENT_UPDATE_TEXT || id == SCE_IME_EVENT_UPDATE_CARET)
+            && !events.empty() && events.back() == id)
+            return;
+        // a game that opened the IME and never polls must not grow this without bound
+        if (events.size() >= 64)
+            events.pop_front();
+        events.push_back(id);
+    }
 
     void deinit() {
         state = false;
         edit_text = {};
+        preedit_rect = {};
         param = {};
         enter_label.clear();
         str.clear();
         caps_level = 0;
         caretIndex = 0;
-        event_id = SCE_IME_EVENT_OPEN;
+        events.clear();
     }
 };
