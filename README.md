@@ -1,19 +1,19 @@
 <div align="center">
 
-# 🎮 Vita3K‑NoInstall
+# 🎮 Vita3K+ NoInstall
 
 ### Play your PS Vita games straight from `.zip` / `.7z` / `.pkg` files — no install step, ever.
 
-[![Build CI](https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/c-cpp.yml/badge.svg?branch=feature%2Fgame-bundle)](https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/c-cpp.yml)
-[![Latest release](https://img.shields.io/badge/release-latest-blue)](https://github.com/sayenah/Vita3k-NoInstall/releases/latest)
+[![Build CI](https://github.com/sayenah/Vita3kPlus-NoInstall/actions/workflows/c-cpp.yml/badge.svg?branch=feature%2Fgame-bundle)](https://github.com/sayenah/Vita3kPlus-NoInstall/actions/workflows/c-cpp.yml)
+[![Latest release](https://img.shields.io/badge/release-latest-blue)](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest)
 [![License: GPL v2](https://img.shields.io/badge/license-GPLv2-orange)](./COPYING.txt)
 [![Upstream](https://img.shields.io/badge/fork%20of-Vita3K-red)](https://github.com/Vita3K/Vita3K)
 
 **A friendly fork of [Vita3K](https://github.com/Vita3K/Vita3K), the experimental PS Vita emulator —
 with the install ritual removed.**
 
-[![Download for Windows](https://img.shields.io/badge/⬇%20Windows%20x64-Vita3K--NoInstall--windows--x64.zip-2ea44f?style=for-the-badge)](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall-windows-x64.zip)
-[![Download for Android](https://img.shields.io/badge/⬇%20Android-Vita3K--NoInstall.apk-2ea44f?style=for-the-badge&logo=android&logoColor=white)](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall.apk)
+[![Download for Windows](https://img.shields.io/badge/⬇%20Windows%20x64-Vita3kPlus--NoInstall--windows--x64.zip-2ea44f?style=for-the-badge)](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest/download/Vita3kPlus-NoInstall-windows-x64.zip)
+[![Download for Android](https://img.shields.io/badge/⬇%20Android-Vita3kPlus--NoInstall.apk-2ea44f?style=for-the-badge&logo=android&logoColor=white)](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest/download/Vita3kPlus-NoInstall.apk)
 
 </div>
 
@@ -25,7 +25,7 @@ Stock Vita3K asks you to **install** every game: each `.pkg` gets unpacked into 
 folder, so you keep two copies (the pkg *and* the install), your games hide behind cryptic
 `PCSE00123` folder names, and front-ends like ES-DE can't just launch a file.
 
-**Vita3K‑NoInstall boots the file directly.** Keep one nicely-named archive per game, anywhere you
+**Vita3K+ NoInstall boots the file directly.** Keep one nicely-named archive per game, anywhere you
 like — internal storage, SD card, a NAS folder — and just press play.
 
 ## How it works
@@ -36,7 +36,7 @@ like — internal storage, SD card, a NAS folder — and just press play.
 | 🔓 **2. It unpacks to a private temp folder** | Decrypted on the fly (updates merged in, DLC attached, licenses applied — see below). |
 | 🎮 **3. It boots from a read-only mount** | The game sees a normal `app0:`; every write attempt is safely refused. **When you quit, the temp folder is deleted.** Nothing is ever installed. |
 
-Your **saves, trophies, and licenses live in the app's own data folder** (`Vita3kPlus-Noinstall`) the
+Your **saves, trophies, and licenses live in the app's own data folder** (`Vita3kPlus-NoInstall`) the
 whole time — moving or deleting a game file never touches them.
 
 ## Features
@@ -59,7 +59,7 @@ whole time — moving or deleting a game file never touches them.
   [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus) (Dead or Alive 5 Plus, Metal Gear Solid 3,
   Killzone, Resistance, LittleBigPlanet, Tearaway and more), plus its Accurate Thread Scheduling setting.
 - 📦 **Its own app** — installs alongside official Vita3K instead of replacing it (Android app id
-  `io.github.sayenah.vita3knoinstall`), with its own data folder and its own update checks. Normal
+  `io.github.sayenah.vita3kplusnoinstall`), with its own data folder and its own update checks. Normal
   installs and settings still work exactly like Vita3K.
 
 ## Quick start
@@ -70,12 +70,12 @@ whole time — moving or deleting a game file never touches them.
 > Details in the [testing guide](./docs/game-bundle/testing.md).
 
 **Windows**
-1. Download [`Vita3K-NoInstall-windows-x64.zip`](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall-windows-x64.zip), extract, run `bin/Vita3K.exe`.
+1. Download [`Vita3kPlus-NoInstall-windows-x64.zip`](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest/download/Vita3kPlus-NoInstall-windows-x64.zip), extract, run `bin/Vita3K.exe`.
 2. Right-click the games list → **ROMs Folders → Add Folder…** and pick where your games live.
 3. Double-click a game. That's it.
 
 **Android**
-1. Download and install [`Vita3K-NoInstall.apk`](https://github.com/sayenah/Vita3k-NoInstall/releases/latest/download/Vita3K-NoInstall.apk).
+1. Download and install [`Vita3kPlus-NoInstall.apk`](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest/download/Vita3kPlus-NoInstall.apk).
 2. Apps list → **⋮ → ROMs Folders… → Add Folder…**.
 3. Tap a game. That's it.
 
@@ -92,23 +92,34 @@ command in your custom system entry:
 
 **Windows** (`es_systems.xml`):
 ```xml
-<command label="Vita3K NoInstall">%EMULATOR_VITA3K% --play-pkg %ROM%</command>
+<command label="Vita3K+ NoInstall">%EMULATOR_VITA3K% --play-pkg %ROM%</command>
 ```
 
-**Android**:
+**Android**: ES-DE's built-in `%EMULATOR_VITA3K%` looks for the official Vita3K app, so first tell it
+where this one lives in `ES-DE/custom_systems/es_find_rules.xml`:
 ```xml
-<command label="Vita3K NoInstall">%EMULATOR_VITA3K%%EXTRA_archive_path%=%ROM%</command>
+<ruleList>
+  <emulator name="VITA3KPLUS-NOINSTALL">
+    <rule type="androidpackage">
+      <entry>io.github.sayenah.vita3kplusnoinstall/org.vita3k.emulator.Emulator</entry>
+    </rule>
+  </emulator>
+</ruleList>
+```
+then use it in the system entry:
+```xml
+<command label="Vita3K+ NoInstall">%EMULATOR_VITA3KPLUS-NOINSTALL%%EXTRA_archive_path%=%ROM%</command>
 ```
 
 Add `.zip`, `.7z` and `.pkg` to the system's extension list, and ES-DE launches your games end-to-end.
 
 ## Downloads & staying current
 
-Grab the newest build any time from **[Releases → latest](https://github.com/sayenah/Vita3k-NoInstall/releases/latest)**.
+Grab the newest build any time from **[Releases → latest](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest)**.
 It refreshes automatically every Monday when upstream Vita3K changes; the
 [builds guide](./docs/game-bundle/getting-builds.md) shows the one-click "build now" button and what to
 do if an update ever needs a human. Linux and macOS builds are available as
-[CI artifacts](https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/c-cpp.yml).
+[CI artifacts](https://github.com/sayenah/Vita3kPlus-NoInstall/actions/workflows/c-cpp.yml).
 
 ## For developers
 

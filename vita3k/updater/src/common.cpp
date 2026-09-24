@@ -6,11 +6,11 @@
 namespace updater {
 
 std::string release_api_url() {
-    return "https://api.github.com/repos/sayenah/Vita3k-NoInstall/releases/tags/latest";
+    return "https://api.github.com/repos/sayenah/Vita3kPlus-NoInstall/releases/tags/latest";
 }
 
 std::string release_page_url() {
-    return "https://github.com/sayenah/Vita3k-NoInstall/releases/tag/latest";
+    return "https://github.com/sayenah/Vita3kPlus-NoInstall/releases/tag/latest";
 }
 
 std::string display_version(const UpdateInfo &info) {

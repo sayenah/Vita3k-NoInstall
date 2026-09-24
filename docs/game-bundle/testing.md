@@ -8,13 +8,13 @@ build in CI). Android is covered in §6.
 ## 1. Get a build
 
 - **End users:** grab the latest **Release** — see `docs/game-bundle/getting-builds.md`
-  (`Vita3K-NoInstall.apk` for Android, `Vita3K-NoInstall-windows-x64.zip` for Windows).
+  (`Vita3kPlus-NoInstall.apk` for Android, `Vita3kPlus-NoInstall-windows-x64.zip` for Windows).
 - **Testing a specific commit:** open the repo's **Actions** tab → a green **Build CI** run → **Artifacts**:
   - Windows: `vita3k-<sha>-windows-x64`
   - Apple-Silicon Mac: `vita3k-<sha>-macos-arm64`
   - Android: the APK from the `android-build` job
 
-  (Or `gh run download <run-id> -R sayenah/Vita3k-NoInstall -n vita3k-<sha>-windows-x64`.) Unzip it. This
+  (Or `gh run download <run-id> -R sayenah/Vita3kPlus-NoInstall -n vita3k-<sha>-windows-x64`.) Unzip it. This
   is a standalone build of the fork; it does not touch your normal Vita3K install.
 
 ## 2. Prerequisites (same as any Vita3K boot)
@@ -138,11 +138,11 @@ The `.Emulator` activity is exported and self-initializes native, so this works 
   `VIEW` `file://` data URI):
 
   ```
-  adb shell am start -n org.vita3k.emulator/org.vita3k.emulator.Emulator \
+  adb shell am start -n io.github.sayenah.vita3kplusnoinstall/org.vita3k.emulator.Emulator \
     -e bundle_path /sdcard/bundles/MyGame
   ```
 
-- A debug APK's package is `org.vita3k.emulator.debug` (check with `adb shell pm list packages | grep
+- A debug APK's package is `io.github.sayenah.vita3kplusnoinstall.debug` (check with `adb shell pm list packages | grep
   vita3k`). Make sure the emulator isn't already mid-game — the fresh-launch path is what reads it.
 
 ### ES-DE (Android and Windows)
@@ -154,18 +154,21 @@ plays without install, a **directory** mounts as a prepared bundle. So ES-DE jus
   title id to `-r`, which only accepts installed games):
 
   ```xml
-  <command label="Vita3K NoInstall">%EMULATOR_VITA3K% --play-pkg %ROM%</command>
+  <command label="Vita3K+ NoInstall">%EMULATOR_VITA3K% --play-pkg %ROM%</command>
   ```
 
 - **Android** (custom system entry) — target the exported activity and pass the ROM in an extra;
   `archive_path` is the archive-specific extra, and `bundle_path` works too (auto-detected):
 
   ```xml
-  <command label="Vita3K NoInstall">%EMULATOR_VITA3K%%EXTRA_archive_path%=%ROM%</command>
+  <command label="Vita3K+ NoInstall">%EMULATOR_VITA3KPLUS-NOINSTALL%%EXTRA_archive_path%=%ROM%</command>
   ```
 
+  `%EMULATOR_VITA3KPLUS-NOINSTALL%` comes from a custom find rule for this app's package (the stock
+  `%EMULATOR_VITA3K%` looks for official Vita3K); see the README's ES-DE setup.
+
   Quick end-to-end test without ES-DE:
-  `adb shell am start -n org.vita3k.emulator/org.vita3k.emulator.Emulator -e archive_path /sdcard/ROMs/psvita/Game.zip`
+  `adb shell am start -n io.github.sayenah.vita3kplusnoinstall/org.vita3k.emulator.Emulator -e archive_path /sdcard/ROMs/psvita/Game.zip`
 
 ## 7. Acceptance checks
 

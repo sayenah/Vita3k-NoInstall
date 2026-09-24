@@ -1,6 +1,6 @@
 <resources>
     <!-- App name -->
-    <string name="app_name">Vita3K NoInstall</string>
+    <string name="app_name">Vita3K+ NoInstall</string>
 
     <!-- Common actions -->
     <string name="action_ok">OK</string>
@@ -38,7 +38,7 @@
     <string name="app_action_reset_last_played">Reset Last Played</string>
 
     <!-- Apps list screen -->
-    <string name="apps_list_app_title">Vita3K NoInstall</string>
+    <string name="apps_list_app_title">Vita3K+ NoInstall</string>
     <plurals name="apps_list_n_selected">
         <item quantity="one">%1$d selected</item>
         <item quantity="other">%1$d selected</item>
@@ -167,13 +167,13 @@
     <string name="updates_official_available_title">Official Build Available</string>
     <string name="updates_latest_build">Latest build</string>
     <string name="updates_open_download_page">Open Download Page</string>
-    <string name="updates_summary_available">A newer Vita3K NoInstall build is available.\n\nCurrent version: %1$s\nLatest version: %2$s</string>
-    <string name="updates_summary_available_with_date">A newer Vita3K NoInstall build is available.\n\nCurrent version: %1$s\nLatest version: %2$s\nPublished: %3$s</string>
+    <string name="updates_summary_available">A newer Vita3K+ NoInstall build is available.\n\nCurrent version: %1$s\nLatest version: %2$s</string>
+    <string name="updates_summary_available_with_date">A newer Vita3K+ NoInstall build is available.\n\nCurrent version: %1$s\nLatest version: %2$s\nPublished: %3$s</string>
     <string name="updates_summary_custom_build">You are currently running a non-official or PR build.\n\nIf you update, you will switch to the latest official build and will no longer be on this custom or PR build.\n\nLatest official build: %1$s</string>
     <string name="updates_summary_custom_build_with_date">You are currently running a non-official or PR build.\n\nIf you update, you will switch to the latest official build and will no longer be on this custom or PR build.\n\nLatest official build: %1$s\nPublished: %2$s</string>
 
     <!-- Initial setup -->
-    <string name="initial_setup_welcome_title">Welcome to Vita3K NoInstall</string>
+    <string name="initial_setup_welcome_title">Welcome to Vita3K+ NoInstall</string>
     <string name="initial_setup_welcome_body">Vita3K is an open-source PlayStation Vita emulator written in C++ for Windows, Linux, macOS, and Android. The emulator is still under active development, so feedback and testing are greatly appreciated.</string>
     <string name="initial_setup_piracy_notice">Vita3K does not condone piracy. You must dump your own games.</string>
     <string name="initial_setup_firmware_title">Install Firmware</string>
@@ -755,8 +755,8 @@
 
     <string name="settings_emulator_browse_files">Browse Vita files</string>
     <string name="settings_emulator_browse_files_value">Open the emulator storage in the system file browser</string>
-    <string name="settings_emulator_browse_files_desc">Opens the Vita3K NoInstall storage folder (games, saves, config, logs) in the system document browser. The same folder also appears as \"Vita3K\" in the sidebar of the system file picker, and in file managers that support document providers such as Solid Explorer, MiXplorer, Total Commander, etc.</string>
-    <string name="settings_emulator_browse_files_unavailable">No document browser found on this device. Vita3K NoInstall still appears as a storage location in the sidebar of the system file picker, and in file managers that support document providers.</string>
+    <string name="settings_emulator_browse_files_desc">Opens the Vita3K+ NoInstall storage folder (games, saves, config, logs) in the system document browser. The same folder also appears as \"Vita3K\" in the sidebar of the system file picker, and in file managers that support document providers such as Solid Explorer, MiXplorer, Total Commander, etc.</string>
+    <string name="settings_emulator_browse_files_unavailable">No document browser found on this device. Vita3K+ NoInstall still appears as a storage location in the sidebar of the system file picker, and in file managers that support document providers.</string>
     <string name="documents_root_summary">Games, saves, config and logs</string>
     <string name="documents_storage_root_summary">Games and saves (custom storage folder)</string>
 </resources>

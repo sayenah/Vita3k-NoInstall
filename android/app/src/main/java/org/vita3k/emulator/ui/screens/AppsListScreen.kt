@@ -515,13 +515,13 @@ private data class ParsedAppVersion(
 )
 
 private const val ABOUT_DESCRIPTION_HTML =
-    """Vita3K NoInstall plays PS Vita games straight from .zip, .7z and .pkg files, without installing them. Report issues on its <a href="https://github.com/sayenah/Vita3k-NoInstall">GitHub</a>. It is a fork of <a href="https://github.com/Vita3K/Vita3K">Vita3K</a>, the open-source PS Vita and PS TV emulator, and includes the game fixes from <a href="https://github.com/nckstwrt/Vita3K-Plus">Vita3K-Plus</a> by nckstwrt. Visit <a href="https://vita3k.org/quickstart.html">vita3k.org</a> for setup guides, or support the Vita3K team on <a href="https://ko-fi.com/vita3k">Ko-fi</a>."""
+    """Vita3K+ NoInstall plays PS Vita games straight from .zip, .7z and .pkg files, without installing them. Report issues on its <a href="https://github.com/sayenah/Vita3kPlus-NoInstall">GitHub</a>. It is a fork of <a href="https://github.com/Vita3K/Vita3K">Vita3K</a>, the open-source PS Vita and PS TV emulator, and includes the game fixes from <a href="https://github.com/nckstwrt/Vita3K-Plus">Vita3K-Plus</a> by nckstwrt. Visit <a href="https://vita3k.org/quickstart.html">vita3k.org</a> for setup guides, or support the Vita3K team on <a href="https://ko-fi.com/vita3k">Ko-fi</a>."""
 
 private const val ABOUT_CREDIT_HTML =
     """Icon by <a href="https://gordonmackayillustration.blogspot.com">Gordon Mackay</a>."""
 
 private const val ABOUT_FOOTER_HTML =
-    """<a href="https://vita3k.org">Website</a> | <a href="https://github.com/sayenah/Vita3k-NoInstall">GitHub</a> | <a href="https://ko-fi.com/vita3k">Ko-fi</a> | <a href="https://discord.com/invite/6aGwQzh">Discord</a>"""
+    """<a href="https://vita3k.org">Website</a> | <a href="https://github.com/sayenah/Vita3kPlus-NoInstall">GitHub</a> | <a href="https://ko-fi.com/vita3k">Ko-fi</a> | <a href="https://discord.com/invite/6aGwQzh">Discord</a>"""
 
 @Composable
 private fun AppsEmptyState(
@@ -1172,7 +1172,7 @@ private fun UpdateCheckDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val defaultDownloadUrl = "https://github.com/sayenah/Vita3k-NoInstall/releases/tag/latest"
+    val defaultDownloadUrl = "https://github.com/sayenah/Vita3kPlus-NoInstall/releases/tag/latest"
     val latestVersion = result.info.version.ifBlank {
         if (result.info.buildNumber > 0L) "Build ${result.info.buildNumber}" else stringResource(R.string.updates_latest_build)
     }

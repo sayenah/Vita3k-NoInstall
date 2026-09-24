@@ -11,11 +11,11 @@
 #   valid values:          android windows-x64 windows-arm64
 #                          linux-x64 linux-arm64 macos-arm64 macos-x64
 #
-# Results land in:  <Downloads>/Vita3k-NoInstall/<platform>/
-#   e.g. the APK ends up at  .../Vita3k-NoInstall/android/app.apk
+# Results land in:  <Downloads>/Vita3kPlus-NoInstall/<platform>/
+#   e.g. the APK ends up at  .../Vita3kPlus-NoInstall/android/app.apk
 
-REPO=sayenah/Vita3k-NoInstall
-DEST="/mnt/c/Users/sinmu/Downloads/Vita3k-NoInstall"
+REPO=sayenah/Vita3kPlus-NoInstall
+DEST="/mnt/c/Users/sinmu/Downloads/Vita3kPlus-NoInstall"
 WF=c-cpp.yml
 
 cd "$(git rev-parse --show-toplevel)" || exit 1

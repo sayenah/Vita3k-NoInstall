@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.sayenah.vita3knoinstall</id>
-  <name>Vita3K NoInstall</name>
+  <id>io.github.sayenah.vita3kplusnoinstall</id>
+  <name>Vita3K+ NoInstall</name>
   <developer id="io.github.sayenah">
-    <name>Vita3K NoInstall contributors</name>
-    <url>https://github.com/sayenah/Vita3k-NoInstall/graphs/contributors</url>
+    <name>Vita3K+ NoInstall contributors</name>
+    <url>https://github.com/sayenah/Vita3kPlus-NoInstall/graphs/contributors</url>
   </developer>
   <summary>PlayStation Vita emulator that plays games without installing them</summary>
   <branding>
@@ -13,16 +13,16 @@
   </branding>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-2.0</project_license>
-  <launchable type="desktop-id">io.github.sayenah.vita3knoinstall.desktop</launchable>
+  <launchable type="desktop-id">io.github.sayenah.vita3kplusnoinstall.desktop</launchable>
   <url type="homepage">https://vita3k.org/</url>
-  <url type="vcs-browser">https://github.com/sayenah/Vita3k-NoInstall</url>
-  <url type="bugtracker">https://github.com/sayenah/Vita3k-NoInstall/issues</url>
+  <url type="vcs-browser">https://github.com/sayenah/Vita3kPlus-NoInstall</url>
+  <url type="bugtracker">https://github.com/sayenah/Vita3kPlus-NoInstall/issues</url>
   <url type="contact">https://discord.gg/6aGwQzh</url>
   <url type="donation">https://ko-fi.com/vita3k</url>
   <url type="faq">https://vita3k.org/faq</url>
   <url type="help">https://vita3k.org/quickstart</url>
   <description>
-    <p>Vita3K NoInstall is a fork of Vita3K, the open-source PlayStation Vita emulator, that plays games straight
+    <p>Vita3K+ NoInstall is a fork of Vita3K, the open-source PlayStation Vita emulator, that plays games straight
       from .zip, .7z and .pkg files without installing them, and includes the Vita3K-Plus compatibility fixes.</p>
   </description>
   <screenshots>
