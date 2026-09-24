@@ -124,11 +124,15 @@ static bool unload_var_imports(const uint32_t *nids, const Ptr<uint32_t> *entrie
     return true;
 }
 
-static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries, size_t count, uint32_t library_nid, const SegmentInfosForReloc &segments, KernelState &kernel, const MemState &mem) {
+static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries, size_t count, uint32_t library_nid, const SegmentInfosForReloc &segments, KernelState &kernel, const MemState &mem, const std::string &lib_name) {
     const std::lock_guard<std::mutex> guard(kernel.export_nids_mutex);
+    size_t by_lib = 0, fallback = 0, unbound = 0;
     for (size_t i = 0; i < count; ++i) {
         const uint32_t nid = nids[i];
         const Ptr<uint32_t> entry = entries[i];
+
+        if (!lib_name.empty())
+            kernel.nid_libraries.emplace(nid, lib_name);
 
         if (kernel.debugger.log_imports) {
             const char *const name = import_name(nid);
@@ -139,8 +143,14 @@ static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries
         Address func_address = 0;
         if (const auto it = kernel.export_nids_by_lib.find(lib_export_key(library_nid, nid)); it != kernel.export_nids_by_lib.end()) {
             func_address = it->second;
+            by_lib++;
         } else if (const auto nid_it = kernel.export_nids.find(nid); nid_it != kernel.export_nids.end()) {
             func_address = nid_it->second;
+            LOG_DEBUG("[LIBNID] import 0x{:08X} ({}) from lib '{}' (nid 0x{:08X}) bound by plain-NID FALLBACK to 0x{:X}",
+                nid, import_name(nid), lib_name, library_nid, nid_it->second);
+            fallback++;
+        } else {
+            unbound++;
         }
         uint32_t *const stub = entry.get(mem);
 
@@ -165,6 +175,9 @@ static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries
             }
         }
     }
+    if (count && (fallback || unbound))
+        LOG_DEBUG("[LIBNID] lib '{}' (nid 0x{:08X}): {} imports = {} by-lib, {} fallback, {} unbound(HLE)",
+            lib_name, library_nid, count, by_lib, fallback, unbound);
     return true;
 }
 
@@ -220,16 +233,18 @@ static bool load_imports(const sce_module_info_raw &module, Ptr<const void> segm
         }
 
         std::string lib_name;
-        if (kernel.debugger.log_imports) {
-            lib_name = Ptr<const char>(library_name).get(mem);
-            LOG_INFO("Loading func imports from {}", lib_name);
+        if (library_name) {
+            if (const char *const lib_name_str = Ptr<const char>(library_name).get(mem))
+                lib_name = lib_name_str;
         }
+        if (kernel.debugger.log_imports)
+            LOG_INFO("Loading func imports from {}", lib_name);
 
         const uint32_t *const nids = Ptr<const uint32_t>(func_nid_table).get(mem);
         const Ptr<uint32_t> *const entries = Ptr<Ptr<uint32_t>>(func_entry_table).get(mem);
 
         const size_t num_syms_funcs = imports->num_syms_funcs;
-        if (!is_unload && !load_func_imports(nids, entries, num_syms_funcs, library_nid, segments, kernel, mem))
+        if (!is_unload && !load_func_imports(nids, entries, num_syms_funcs, library_nid, segments, kernel, mem, lib_name))
             return false;
         if (is_unload && !unload_func_imports(nids, entries, num_syms_funcs, kernel))
             return false;
@@ -754,10 +769,13 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
     if (module_info->module_stop != 0xffffffff && module_info->module_stop != 0)
         sceKernelModuleInfo->stop_entry = module_info_segment_address + module_info->module_stop;
 
-    sceKernelModuleInfo->exidx_top = Ptr<const void>(module_info->exidx_top);
-    sceKernelModuleInfo->exidx_btm = Ptr<const void>(module_info->exidx_end);
-    sceKernelModuleInfo->extab_top = Ptr<const void>(module_info->extab_top);
-    sceKernelModuleInfo->extab_btm = Ptr<const void>(module_info->extab_end);
+    const auto relocate_or_zero = [&](uint32_t offset) {
+        return Ptr<const void>(offset ? (module_info_segment_address.address() + offset) : 0);
+    };
+    sceKernelModuleInfo->exidx_top = relocate_or_zero(module_info->exidx_top);
+    sceKernelModuleInfo->exidx_btm = relocate_or_zero(module_info->exidx_end);
+    sceKernelModuleInfo->extab_top = relocate_or_zero(module_info->extab_top);
+    sceKernelModuleInfo->extab_btm = relocate_or_zero(module_info->extab_end);
 
     sceKernelModuleInfo->tlsInit = Ptr<const void>(!module_info->tls_start ? 0 : (module_info_segment_address.address() + module_info->tls_start));
     sceKernelModuleInfo->tlsInitSize = module_info->tls_filesz;
@@ -784,6 +802,7 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
 
         SceKernelSegmentInfo &segment = sceKernelModuleInfo->segments[segment_index];
         segment.size = sizeof(segment);
+        segment.perms = segments[segment_index].p_flags;
         segment.vaddr = it->second.addr;
         segment.memsz = segments[segment_index].p_memsz;
         segment.filesz = segments[segment_index].p_filesz;

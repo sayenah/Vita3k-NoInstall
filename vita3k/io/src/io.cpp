@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <chrono>
+
 #include <io/bundle.h>
 #include <io/device.h>
 #include <io/functions.h>
@@ -28,6 +30,17 @@
 #include <util/log.h>
 #include <util/preprocessor.h>
 #include <util/string_utils.h>
+
+#include <mem/ptr.h>
+#include <mem/state.h>
+#include <mem/util.h>
+#include <util/align.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <shared_mutex>
+#include <vector>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -100,7 +113,8 @@ static bool is_valid_output_path(const VitaIoDevice device) {
     return !(device == VitaIoDevice::savedata0 || device == VitaIoDevice::savedata1 || device == VitaIoDevice::app0
         || device == VitaIoDevice::_INVALID || device == VitaIoDevice::addcont0 || device == VitaIoDevice::tty0
         || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2 || device == VitaIoDevice::tty3
-        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0);
+        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0
+        || device == VitaIoDevice::memory);
 }
 
 bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, const fs::path &vita_fs_path, bool redirect_stdio) {
@@ -115,6 +129,8 @@ bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, con
     const fs::path vd0{ vita_fs_path / "vd0" };
 
     fs::create_directories(ux0 / "data");
+    fs::remove_all(ux0 / "data/memory");
+    fs::create_directories(ux0 / "data/memory");
     fs::create_directories(ux0 / "app");
     fs::create_directories(ux0 / "music");
     fs::create_directories(ux0 / "picture");
@@ -268,6 +284,11 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
         device = VitaIoDevice::ux0;
         break;
     }
+    case VitaIoDevice::memory: { // Redirect memory: (RAM work directory) to ux0:data/memory
+        relative_path = device::remove_device_from_path(relative_path, device, "data/memory");
+        device = VitaIoDevice::ux0;
+        break;
+    }
     case VitaIoDevice::video0: { // Redirect video0: to ux0:video
         relative_path = device::remove_device_from_path(relative_path, device, "video");
         device = VitaIoDevice::ux0;
@@ -411,15 +432,162 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
 
     FileStats f{ path, normalized_path, system_path, flags };
     const auto fd = io.next_fd++;
-    io.std_files.emplace(fd, f);
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        io.std_files.emplace(fd, f);
+    }
 
     LOG_TRACE_IF(log_file_op, "{}: Opening file {} ({}), fd: {}", export_name, path, normalized_path, log_hex(fd));
     return fd;
 }
 
+static constexpr bool IODIAG_ENABLED = false; // seq-185 diagnostic; served its purpose (GB3 stale pointer, KZ jump cadence). Off for commit.
+
+void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nbyte, int result,
+    Address dst, const char *block, const char *thread) {
+    if (!IODIAG_ENABLED || nbyte < 4096)
+        return;
+    using namespace std::chrono;
+    static steady_clock::time_point burst_start{};
+    static uint32_t burst_count = 0;
+    const auto now = steady_clock::now();
+    if (now - burst_start >= seconds(5)) {
+        burst_start = now;
+        burst_count = 0;
+    }
+    if (burst_count >= 24)
+        return;
+    burst_count++;
+    LOG_INFO("[IODIAG] {} dst=0x{:08X}..0x{:08X} block='{}' fd={} off={} size={} -> {} thread='{}'",
+        kind, dst, dst + nbyte, block, log_hex(fd), offset, nbyte, result, thread);
+}
+
+int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, const SceOff offset, const char *export_name) {
+    assert(data != nullptr);
+    if (fd < 0)
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    if (!io.file_mutex.try_lock()) {
+        const uint64_t contended = io.concurrent_positional_io.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (contended <= 8 || contended % 1000 == 0)
+            LOG_WARN("[IODIAG] concurrent positional IO on fd {} (contended {} times)", log_hex(fd), contended);
+        io.file_mutex.lock();
+    }
+    const std::lock_guard<std::mutex> lock(io.file_mutex, std::adopt_lock);
+
+    const auto file = io.std_files.find(fd);
+    if (file == io.std_files.end())
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const SceOff previous = file->second.tell();
+    if (previous < 0)
+        return static_cast<int>(previous);
+    if (!file->second.seek(offset, SCE_SEEK_SET))
+        return IO_ERROR_UNK();
+
+    const auto read = file->second.read(data, 1, size);
+
+    // put the shared position back exactly as we found it
+    file->second.seek(previous, SCE_SEEK_SET);
+
+    if (IODIAG_ENABLED) {
+        using namespace std::chrono;
+        static steady_clock::time_point burst_start{};
+        static uint32_t burst_count = 0;
+        const auto now = steady_clock::now();
+        if (now - burst_start >= seconds(5)) {
+            burst_start = now;
+            burst_count = 0;
+        }
+        if (burst_count < 16) {
+            burst_count++;
+            LOG_INFO("[IODIAG] pread fd={} offset={} size={} -> {}{}", log_hex(fd), offset, size,
+                read, (read != size) ? "  SHORT READ" : "");
+        }
+    }
+    return static_cast<int>(read);
+}
+
+int read_file_into_guest(MemState &mem, Address dst, IOState &io, SceUID fd, SceSize size, SceOff offset, const char *export_name) {
+    const auto read_to = [&](void *host) {
+        return offset < 0 ? read_file(host, io, fd, size, export_name) : read_file_at(host, io, fd, size, offset, export_name);
+    };
+    if (!mem.use_page_table || size == 0 || dst == 0)
+        return read_to(Ptr<void>(dst).get(mem));
+
+    const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+
+    uint8_t *const base = mem.page_table[dst / KiB(4)];
+    bool contiguous = true;
+    for (Address page = align_down(dst, KiB(4)) + KiB(4); page < dst + size; page += KiB(4)) {
+        if (mem.page_table[page / KiB(4)] != base) {
+            contiguous = false;
+            break;
+        }
+    }
+
+    static std::atomic<uint32_t> mapped_reads{ 0 };
+    static std::atomic<uint32_t> split_reads{ 0 };
+    if (base != mem.memory.get()) {
+        const uint32_t n = mapped_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+        {
+            static std::atomic<uint32_t> gpu_range_logs{ 0 };
+            static std::atomic<int64_t> gpu_range_last_us{ 0 };
+            const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            int64_t last = gpu_range_last_us.load(std::memory_order_relaxed);
+            if (gpu_range_logs.fetch_add(1, std::memory_order_relaxed) < 8
+                || (now_us - last >= 60'000'000 && gpu_range_last_us.compare_exchange_strong(last, now_us, std::memory_order_relaxed)))
+                LOG_INFO("[IO] {}: file read of {} bytes into a GPU-mapped guest range 0x{:X}, resolved under the transition lock ({} such reads so far, {} split across backings)", export_name, size, dst, n, split_reads.load(std::memory_order_relaxed));
+        }
+    }
+    if (contiguous)
+        return read_to(Ptr<void>(dst).get(mem));
+
+    split_reads.fetch_add(1, std::memory_order_relaxed);
+    static thread_local std::vector<uint8_t> temp;
+    temp.resize(size);
+    const int got = read_to(temp.data());
+    if (got <= 0)
+        return got;
+    uint32_t off = 0;
+    while (off < static_cast<uint32_t>(got)) {
+        const Address cur = dst + off;
+        const uint32_t chunk = std::min<uint32_t>(static_cast<uint32_t>(got) - off, static_cast<uint32_t>(KiB(4) - (cur & 0xFFFu)));
+        memcpy(Ptr<uint8_t>(cur).get(mem), temp.data() + off, chunk);
+        off += chunk;
+    }
+    return got;
+}
+
+int write_file_at(const SceUID fd, const void *data, const SceSize size, const SceOff offset, IOState &io, const char *export_name) {
+    assert(data != nullptr);
+    if (fd < 0)
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
+    const auto file = io.std_files.find(fd);
+    if (file == io.std_files.end())
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+    if (!file->second.can_write_file())
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const SceOff previous = file->second.tell();
+    if (previous < 0)
+        return static_cast<int>(previous);
+    if (!file->second.seek(offset, SCE_SEEK_SET))
+        return IO_ERROR_UNK();
+
+    const auto written = file->second.write(data, 1, size);
+    file->second.seek(previous, SCE_SEEK_SET);
+    return static_cast<int>(written);
+}
+
 int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, const char *export_name) {
     assert(data != nullptr);
     assert(size >= 0);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
 
     const auto file = io.std_files.find(fd);
     if (file != io.std_files.end()) {
@@ -445,6 +613,8 @@ int write_file(SceUID fd, const void *data, const SceSize size, const IOState &i
     assert(data != nullptr);
     assert(size >= 0);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
     if (fd < 0) {
         LOG_WARN("Error writing fd: {}, size: {}", log_hex(fd), size);
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -459,9 +629,11 @@ int write_file(SceUID fd, const void *data, const SceSize size, const IOState &i
             if (io.redirect_stdio) {
                 std::cout << s;
             } else {
-                if (s.back() == '\n')
+                if (!s.empty() && s.back() == '\n')
                     s.pop_back();
-                LOG_TRACE_IF(log_file_op, "*** TTY: {}", s);
+                // Always log it. This is the guest telling us what went wrong in its own words
+                if (!s.empty())
+                    LOG_INFO("*** TTY: {}", s);
             }
 
             return size;
@@ -505,6 +677,8 @@ SceOff seek_file(const SceUID fd, const SceOff offset, const SceIoSeekMode whenc
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
     const auto file = io.std_files.find(fd);
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -528,6 +702,8 @@ SceOff seek_file(const SceUID fd, const SceOff offset, const SceIoSeekMode whenc
 SceOff tell_file(IOState &io, const SceUID fd, const char *export_name) {
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
 
     const auto std_file = io.std_files.find(fd);
 
@@ -694,6 +870,8 @@ int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::pa
 int close_file(IOState &io, const SceUID fd, const char *export_name) {
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
 
     LOG_TRACE_IF(log_file_op, "{}: Closing file fd: {}", export_name, log_hex(fd));
 
@@ -1013,18 +1191,17 @@ SceUID create_overlay(IOState &io, SceFiosProcessOverlay *fios_overlay) {
     return res;
 }
 
-std::string resolve_path(IOState &io, const char *input, const SceUInt32 min_order, const SceUInt32 max_order) {
+std::string resolve_path(IOState &io, const char *input, const fs::path &vita_fs_path, const SceUInt32 min_order, const SceUInt32 max_order) {
     std::lock_guard<std::mutex> lock(io.overlay_mutex);
 
-    std::string curr_path = input;
+    const std::string curr_path = input;
 
     size_t overlay_idx = 0;
     while (overlay_idx < io.overlays.size() && io.overlays[overlay_idx].order < min_order)
         overlay_idx++;
 
-    while (overlay_idx < io.overlays.size()) {
+    for (; overlay_idx < io.overlays.size(); overlay_idx++) {
         const FiosOverlay &overlay = io.overlays[overlay_idx];
-        overlay_idx++;
 
         if (overlay.order > max_order)
             break;
@@ -1032,8 +1209,18 @@ std::string resolve_path(IOState &io, const char *input, const SceUInt32 min_ord
         if (!curr_path.starts_with(overlay.dst))
             continue;
 
-        // replace dst with src
-        curr_path = overlay.src + curr_path.substr(overlay.dst.size());
+        const std::string candidate = overlay.src + curr_path.substr(overlay.dst.size());
+
+        if (overlay.type == SCE_FIOS_OVERLAY_TYPE_OPAQUE)
+            return candidate;
+
+        VitaIoDevice candidate_device = device::get_device(candidate.c_str());
+        if (candidate_device == VitaIoDevice::_INVALID)
+            continue;
+
+        const fs::path host_path = expand_path(io, candidate.c_str(), vita_fs_path);
+        if (fs::exists(host_path))
+            return candidate;
     }
 
     return curr_path;

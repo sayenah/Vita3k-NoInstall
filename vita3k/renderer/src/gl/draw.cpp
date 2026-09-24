@@ -61,10 +61,10 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
 
     GLuint program_id = context.last_draw_program;
 
-    const SceGxmFragmentProgram &gxm_fragment_program = *context.record.fragment_program.get(mem);
-    const SceGxmProgram &fragment_program_gxp = *gxm_fragment_program.program.get(mem);
+    const ProgramBinding &fragment_program = *context.record.fragment_program_binding;
+    const SceGxmProgram &fragment_program_gxp = *fragment_program.program();
 
-    if (!renderer.features.use_mask_bit && gxm_fragment_program.is_maskupdate) {
+    if (!renderer.features.use_mask_bit && fragment_program.is_maskupdate) {
         static bool has_happened = false;
         LOG_ERROR_IF(!has_happened, "Mask bit is disabled!");
         has_happened = true;
@@ -73,9 +73,9 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
 
     // Trying to cache: the last time vs this time shader pair. Does it different somehow?
     // If it's different, we need to switch. Else just stick to it.
-    if (context.record.vertex_program.get(mem)->renderer_data->hash != context.last_draw_vertex_program_hash || context.record.fragment_program.get(mem)->renderer_data->hash != context.last_draw_fragment_program_hash) {
+    if (context.record.vertex_program_binding->vertex_program->hash != context.last_draw_vertex_program_hash || context.record.fragment_program_binding->fragment_program->hash != context.last_draw_fragment_program_hash) {
         // Need to recompile!
-        SharedGLObject program = gl::compile_program(renderer, context, context.record, features, mem, config.shader_cache, config.spirv_shader, gxm_fragment_program.is_maskupdate);
+        SharedGLObject program = gl::compile_program(renderer, context, context.record, features, mem, config.shader_cache, config.spirv_shader, fragment_program.is_maskupdate);
 
         LOG_ERROR_IF(!program, "Fail to get program!");
 
@@ -87,8 +87,8 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
     }
 
     if (config.log_active_shaders) {
-        const std::string hash_text_f = hex_string(context.record.fragment_program.get(mem)->renderer_data->hash);
-        const std::string hash_text_v = hex_string(context.record.vertex_program.get(mem)->renderer_data->hash);
+        const std::string hash_text_f = hex_string(context.record.fragment_program_binding->fragment_program->hash);
+        const std::string hash_text_v = hex_string(context.record.vertex_program_binding->vertex_program->hash);
 
         LOG_DEBUG("\nVertex  : {}\nFragment: {}", hash_text_v, hash_text_f);
         LOG_DEBUG(fmt::runtime("Vertex default uniform buffer: {}\n"), spdlog::to_hex(context.ubo_data[0], 16));
@@ -160,6 +160,7 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
         glBindFramebuffer(GL_FRAMEBUFFER, context.render_target->maskbuffer[0]);
     }
     frag_ublock.writing_mask = context.record.writing_mask;
+    frag_ublock.color_write_mask = static_cast<float>(context.record.fragment_program_binding->fragment_program->color_write_mask);
     frag_ublock.use_raw_image = static_cast<float>(use_raw_image);
     frag_ublock.res_multiplier = renderer.res_multiplier;
     const bool has_msaa = context.render_target->multisample_mode;
@@ -237,8 +238,8 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
         sync_blending(context.record, mem);
     }
 
-    context.last_draw_vertex_program_hash = context.record.vertex_program.get(mem)->renderer_data->hash;
-    context.last_draw_fragment_program_hash = context.record.fragment_program.get(mem)->renderer_data->hash;
+    context.last_draw_vertex_program_hash = context.record.vertex_program_binding->vertex_program->hash;
+    context.last_draw_fragment_program_hash = context.record.fragment_program_binding->fragment_program->hash;
 
     context.vertex_stream_ring_buffer.draw_call_done();
     context.index_stream_ring_buffer.draw_call_done();

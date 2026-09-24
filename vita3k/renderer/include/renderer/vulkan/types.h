@@ -18,8 +18,10 @@
 #pragma once
 
 #include <renderer/texture_cache.h>
+
 #include <renderer/types.h>
 #include <shader/uniform_block.h>
+#include <unordered_map>
 #include <vkutil/objects.h>
 
 struct MemState;
@@ -56,6 +58,8 @@ struct TextureCacheEntry {
 struct VKTextureCache : public TextureCache {
     VKState &state;
 
+    uint64_t release_all_cached_textures();
+
     TextureStagingBuffer staging_buffers[NB_TEXTURE_STAGING_BUFFERS];
     uint32_t staging_idx = 0;
     uint64_t last_waited_scene = 0;
@@ -78,8 +82,13 @@ struct VKTextureCache : public TextureCache {
     void configure_texture(const SceGxmTexture &texture) override;
     void upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) override;
     void upload_done() override;
-
     void configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) override;
+
+    bool format_supports_linear_filter(vk::Format format);
+    std::unordered_map<VkFormat, bool> linear_filter_support_cache;
+
+    bool format_supports_sampled_image(vk::Format format);
+    std::unordered_map<VkFormat, bool> sampled_image_support_cache;
 
     void import_configure_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, bool is_srgb, uint16_t nb_components, uint16_t mipcount, bool swap_rb) override;
 
@@ -133,6 +142,8 @@ struct MappedMemory {
     vk::Buffer buffer;
     uint32_t size;
     uint64_t buffer_address;
+    uint32_t gpu_offset = 0;
+    uint64_t last_gpu_use = 0;
 };
 
 enum struct BufferType {
@@ -179,6 +190,7 @@ struct VisibilityBuffer {
 
 struct FenceWaitRequest {
     vk::Fence fence;
+    uint64_t serial = 0;
 };
 
 // request to trigger a notification after the previous fences have been waited for
@@ -205,6 +217,8 @@ struct CallbackRequest {
     // use a pointer so the size is similar to other elements of WaitThreadRequest
     // and not to have to mess with move semantics
     CallbackRequestFunction *callback;
+    // when true, the wait thread drains all pending GPU fences before firing the callback
+    bool wait_for_gpu = false;
 };
 
 // only used with the DoubleBuffer Method
@@ -212,6 +226,9 @@ struct CallbackRequest {
 struct BufferSyncRequest {
     Address location;
     uint32_t size;
+    uint32_t row_stride = 0;
+    uint32_t row_bytes = 0;
+    uint32_t row_count = 0;
 };
 
 // A parallel thread is handling these request and telling other waiting threads
@@ -236,6 +253,17 @@ struct VKContext : public renderer::Context {
     uint64_t frame_timestamp = 1;
     uint64_t scene_timestamp = 1;
     std::vector<vk::CommandBuffer> cmdbuffers_to_submit = {};
+
+    bool scene_wrote_depth = false;
+    bool scene_has_drawn = false;
+    bool gxmscene_viewport_logged = false;
+    float surface_downscale = 1.0f;
+    bool scene_macroblock_flushed = false;
+
+    uint32_t current_fb_width = 0;
+    uint32_t current_fb_height = 0;
+
+    vk::ImageView current_color_raw_view = nullptr;
 
     vkutil::HostRingBuffer vertex_stream_ring_buffer;
     vkutil::HostRingBuffer index_stream_ring_buffer;
@@ -300,6 +328,7 @@ struct VKContext : public renderer::Context {
     vkutil::Image *current_color_base_image;
     vk::Format current_color_format;
     vk::ImageView current_color_view;
+    vk::ImageView current_color_storage_view;
     vk::ImageView current_ds_view;
 
     bool is_recording = false;
@@ -319,6 +348,18 @@ struct VKContext : public renderer::Context {
     uint16_t last_macroblock_y = ~0;
     // special case where we can't determine the current macroblock
     bool ignore_macroblock = false;
+
+    // used to clamp perform_surface_sync for macrotile targets so that only the rendered macroblocks are written back to guest memory
+    int32_t rendered_rect_x0 = INT32_MAX;
+    int32_t rendered_rect_y0 = INT32_MAX;
+    int32_t rendered_rect_x1 = 0;
+    int32_t rendered_rect_y1 = 0;
+
+    // union of scissor x viewport of every draw in the scene (scaled coords): the only region the GPU can have written
+    int32_t draw_rect_x0 = INT32_MAX;
+    int32_t draw_rect_y0 = INT32_MAX;
+    int32_t draw_rect_x1 = 0;
+    int32_t draw_rect_y1 = 0;
 
     // used if necessary to restart easily the render pass
     vk::RenderPassBeginInfo curr_renderpass_info;
@@ -351,6 +392,8 @@ struct VKRenderTarget : public renderer::RenderTarget {
     vk::Device device;
     uint16_t width;
     uint16_t height;
+    uint16_t base_width;
+    uint16_t base_height;
     vkutil::Image color;
     vkutil::Image depthstencil;
 

@@ -29,6 +29,8 @@
 
 #include <string>
 
+struct MemState;
+
 struct IOState;
 
 inline SceUID invalid_fd = -1;
@@ -59,6 +61,10 @@ bool copy_path(const fs::path &src_path, const fs::path &vita_fs_path, const std
 
 SceUID open_file(IOState &io, const char *path, const int flags, const fs::path &vita_fs_path, const char *export_name);
 int read_file(void *data, IOState &io, SceUID fd, SceSize size, const char *export_name);
+int read_file_at(void *data, IOState &io, SceUID fd, SceSize size, SceOff offset, const char *export_name);
+int read_file_into_guest(MemState &mem, Address dst, IOState &io, SceUID fd, SceSize size, SceOff offset, const char *export_name);
+void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nbyte, int result, Address dst, const char *block, const char *thread);
+int write_file_at(SceUID fd, const void *data, SceSize size, SceOff offset, IOState &io, const char *export_name);
 int write_file(SceUID fd, const void *data, SceSize size, const IOState &io, const char *export_name);
 int truncate_file(SceUID fd, unsigned long long length, const IOState &io, const char *export_name);
 SceOff seek_file(SceUID fd, SceOff offset, SceIoSeekMode whence, IOState &io, const char *export_name);
@@ -77,4 +83,4 @@ int remove_dir(IOState &io, const char *dir, const fs::path &vita_fs_path, const
 
 // SceFios functions
 SceUID create_overlay(IOState &io, SceFiosProcessOverlay *fios_overlay);
-std::string resolve_path(IOState &io, const char *input, const SceUInt32 min_order = 0, const SceUInt32 max_order = 0x7F);
+std::string resolve_path(IOState &io, const char *input, const fs::path &vita_fs_path, const SceUInt32 min_order = 0, const SceUInt32 max_order = 0x7F);

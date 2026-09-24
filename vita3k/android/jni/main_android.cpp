@@ -79,7 +79,7 @@ bool handle_ime_keydown(EmuEnvState &emuenv, const SDL_KeyboardEvent &event) {
             finish_ime_dialog(emuenv);
         } else {
             std::lock_guard<std::mutex> lock(ime.mutex);
-            ime.event_id = SCE_IME_EVENT_PRESS_ENTER;
+            ime.push_event(SCE_IME_EVENT_PRESS_ENTER);
         }
         ime::notify_ime_state_changed();
         return true;
@@ -89,7 +89,7 @@ bool handle_ime_keydown(EmuEnvState &emuenv, const SDL_KeyboardEvent &event) {
             cancel_ime_dialog(emuenv);
         } else {
             std::lock_guard<std::mutex> lock(ime.mutex);
-            ime.event_id = SCE_IME_EVENT_PRESS_CLOSE;
+            ime.push_event(SCE_IME_EVENT_PRESS_CLOSE);
         }
         ime::notify_ime_state_changed();
         return true;

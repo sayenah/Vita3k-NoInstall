@@ -44,7 +44,7 @@ void ime_commit_text(Ime &ime, const std::u16string &text) {
     ime.edit_text.preeditLength = 0;
     ime.edit_text.editLengthChange = 0;
 
-    ime.event_id = SCE_IME_EVENT_UPDATE_TEXT;
+    ime.push_event(SCE_IME_EVENT_UPDATE_TEXT);
 }
 
 void ime_set_preedit(Ime &ime, const std::u16string &preedit) {
@@ -57,7 +57,7 @@ void ime_set_preedit(Ime &ime, const std::u16string &preedit) {
     if (preedit.empty()) {
         ime.edit_text.editLengthChange = 0;
         ime.caretIndex = ime.edit_text.caretIndex;
-        ime.event_id = SCE_IME_EVENT_UPDATE_TEXT;
+        ime.push_event(SCE_IME_EVENT_UPDATE_TEXT);
         return;
     }
 
@@ -73,7 +73,7 @@ void ime_set_preedit(Ime &ime, const std::u16string &preedit) {
     ime.edit_text.editLengthChange = static_cast<int32_t>(preedit_len);
     ime.edit_text.caretIndex += preedit_len;
 
-    ime.event_id = SCE_IME_EVENT_UPDATE_TEXT;
+    ime.push_event(SCE_IME_EVENT_UPDATE_TEXT);
 }
 
 void ime_cursor_left(Ime &ime) {
@@ -89,7 +89,7 @@ void ime_cursor_left(Ime &ime) {
         --ime.edit_text.caretIndex;
     ime.caretIndex = ime.edit_text.caretIndex;
     ime.edit_text.preeditIndex = ime.edit_text.caretIndex;
-    ime.event_id = SCE_IME_EVENT_UPDATE_CARET;
+    ime.push_event(SCE_IME_EVENT_UPDATE_CARET);
 }
 
 void ime_cursor_right(Ime &ime) {
@@ -105,7 +105,7 @@ void ime_cursor_right(Ime &ime) {
         ++ime.edit_text.caretIndex;
     ime.caretIndex = ime.edit_text.caretIndex;
     ime.edit_text.preeditIndex = ime.edit_text.caretIndex;
-    ime.event_id = SCE_IME_EVENT_UPDATE_CARET;
+    ime.push_event(SCE_IME_EVENT_UPDATE_CARET);
 }
 
 void ime_backspace(Ime &ime) {
@@ -115,7 +115,7 @@ void ime_backspace(Ime &ime) {
         ime.edit_text.preeditLength = 0;
         ime.edit_text.editLengthChange = 0;
         ime.caretIndex = ime.edit_text.caretIndex;
-        ime.event_id = SCE_IME_EVENT_UPDATE_TEXT;
+        ime.push_event(SCE_IME_EVENT_UPDATE_TEXT);
         return;
     }
 
@@ -127,7 +127,7 @@ void ime_backspace(Ime &ime) {
     --ime.edit_text.caretIndex;
     ime.caretIndex = ime.edit_text.caretIndex;
     ime.edit_text.preeditIndex = ime.edit_text.caretIndex;
-    ime.event_id = SCE_IME_EVENT_UPDATE_TEXT;
+    ime.push_event(SCE_IME_EVENT_UPDATE_TEXT);
 }
 
 std::vector<std::pair<SceImeLanguage, std::string>>::const_iterator
