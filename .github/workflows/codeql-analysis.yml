@@ -20,6 +20,14 @@ on:
   schedule:
     - cron: '0 1 * * 3'
 
+  workflow_dispatch:
+
+# The repo's default GITHUB_TOKEN is read-only; CodeQL needs security-events: write to upload results.
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
 env:
   BUILD_CONFIG: Release
   QT_VERSION: '6.11.0'
