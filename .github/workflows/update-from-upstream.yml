@@ -31,7 +31,12 @@ env:
   # Files the fork replaces wholesale. When upstream edits one of these, the rebase keeps the
   # fork's version instead of stopping. Anything else that conflicts still needs a human.
   FORK_OWNED_FILES: README.md
-  ISSUE_TITLE_PREFIX: "Upstream update needs manual conflict resolution"
+  ISSUE_TITLE_PREFIX: "Upstream update needs"
+  # GitHub refuses GITHUB_TOKEN pushes that touch .github/workflows/, which upstream's CI commits
+  # do. A fine-grained PAT (this repo; Contents + Workflows: read/write) saved as the
+  # UPSTREAM_SYNC_TOKEN secret lets those updates through. Pushes made with it trigger Build CI
+  # on their own, so the explicit dispatch below is only used without it.
+  HAS_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
 
 jobs:
   rebase-and-build:
@@ -42,6 +47,7 @@ jobs:
         with:
           ref: feature/game-bundle
           fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Configure git identity
         run: |
@@ -57,7 +63,8 @@ jobs:
           git fetch upstream --tags --prune
           if git rev-parse --verify "upstream/$REF" >/dev/null 2>&1; then TARGET="upstream/$REF"; else TARGET="$REF"; fi
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          echo "orig=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          ORIG=$(git rev-parse HEAD)
+          echo "orig=$ORIG" >> "$GITHUB_OUTPUT"
           echo "Target: $TARGET"
 
           # On the weekly auto-run, do nothing if upstream has not moved past what we're built on.
@@ -87,21 +94,29 @@ jobs:
               if GIT_EDITOR=true git rebase --continue; then break; fi
             done
           fi
+          if [ "$status" = ok ] && [ "$(git rev-parse HEAD)" = "$ORIG" ]; then
+            echo "Already up to date with $TARGET -- nothing to push."
+            status=uptodate
+          elif [ "$status" = ok ] && [ "$HAS_SYNC_TOKEN" != true ] && \
+             ! git diff --quiet "$ORIG" HEAD -- .github/workflows; then
+            echo "::error::Upstream changed .github/workflows/, which GITHUB_TOKEN may not push. Add the UPSTREAM_SYNC_TOKEN secret."
+            status=needs-token
+          fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
       - name: Push rebased branch
         if: steps.rebase.outputs.status == 'ok'
         run: |
-          # Safety snapshot of the pre-rebase tip, only taken when we are about to rewrite history.
+          # Safety snapshot of the pre-rebase tip, pushed atomically with the rewrite so a rejected
+          # push leaves no stray backup. --force-with-lease refuses to clobber anything pushed to the
+          # branch while this job was running.
           BACKUP="backup/auto-$(date +%Y%m%d-%H%M%S)"
-          git push origin "${{ steps.rebase.outputs.orig }}:refs/heads/$BACKUP"
+          git push --atomic --force-with-lease="feature/game-bundle:${{ steps.rebase.outputs.orig }}" origin \
+            "${{ steps.rebase.outputs.orig }}:refs/heads/$BACKUP" HEAD:feature/game-bundle
           echo "Backup pushed: $BACKUP"
-          # Refuse to clobber anything pushed to the branch while this job was running.
-          git push --force-with-lease="feature/game-bundle:${{ steps.rebase.outputs.orig }}" \
-            origin HEAD:feature/game-bundle
 
       - name: Trigger a build of the updated code
-        if: steps.rebase.outputs.status == 'ok'
+        if: steps.rebase.outputs.status == 'ok' && env.HAS_SYNC_TOKEN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -125,12 +140,24 @@ jobs:
           done
 
       - name: File an issue if the rebase needs a human
-        if: steps.rebase.outputs.status == 'conflict'
+        if: steps.rebase.outputs.status == 'conflict' || steps.rebase.outputs.status == 'needs-token'
         env:
           GH_TOKEN: ${{ github.token }}
           CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "${{ steps.rebase.outputs.status }}" = needs-token ]; then
+            TITLE="$ISSUE_TITLE_PREFIX a token that can update workflows"
+            BODY="Rebasing onto \`${{ steps.rebase.outputs.target }}\` succeeded, but upstream changed files under \`.github/workflows/\`, and GitHub does not let the built-in GITHUB_TOKEN push those. Nothing was pushed; the branch is unchanged.
+
+          Fix once:
+          1. Create a fine-grained personal access token at https://github.com/settings/personal-access-tokens/new, limited to this repository, with **Contents: Read and write** and **Workflows: Read and write**.
+          2. Save it as the repository secret \`UPSTREAM_SYNC_TOKEN\` (Settings > Secrets and variables > Actions).
+          3. Re-run **Update from upstream** from the Actions tab.
+
+          Run: $RUN_URL"
+          else
+          TITLE="$ISSUE_TITLE_PREFIX manual conflict resolution"
           BODY="Automatic rebase of our patches onto \`${{ steps.rebase.outputs.target }}\` hit a merge conflict and was aborted (nothing was pushed; the branch is unchanged).
 
           Conflicting files:
@@ -148,6 +175,7 @@ jobs:
           Once pushed, a build runs and a new Release is published automatically.
 
           Run: $RUN_URL"
+          fi
 
           # One open issue at a time: add a comment to the existing one instead of opening duplicates.
           EXISTING=$(gh issue list -R "${{ github.repository }}" --state open \
@@ -158,11 +186,11 @@ jobs:
           $BODY" || true
           else
             gh issue create -R "${{ github.repository }}" \
-              --title "$ISSUE_TITLE_PREFIX ($(date +%Y-%m-%d))" --body "$BODY" || true
+              --title "$TITLE ($(date +%Y-%m-%d))" --body "$BODY" || true
           fi
 
-      - name: Mark the run failed on conflict
-        if: steps.rebase.outputs.status == 'conflict'
+      - name: Mark the run failed when a human is needed
+        if: steps.rebase.outputs.status == 'conflict' || steps.rebase.outputs.status == 'needs-token'
         run: |
-          echo "::error::Rebase conflict -- see the open '$ISSUE_TITLE_PREFIX' issue."
+          echo "::error::Upstream update needs attention (${{ steps.rebase.outputs.status }}) -- see the open issue."
           exit 1
