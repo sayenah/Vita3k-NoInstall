@@ -959,6 +959,10 @@ void deinit_mem(MemState &state) {
 
 #ifdef _WIN32
 
+// Decoding the faulting host instruction needs Zydis and the x64 CONTEXT, so ARM64 Windows
+// keeps the plain fault handling.
+#if defined(_M_X64) || defined(__x86_64__)
+#define VITA3K_EMULATE_REFUSED_JIT_ACCESS
 #include <Zydis/Zydis.h>
 
 static bool rip_in_host_module(const uint64_t rip) noexcept {
@@ -1044,6 +1048,7 @@ static bool emulate_refused_jit_access(PEXCEPTION_POINTERS pExp, const uint8_t *
             reinterpret_cast<uintptr_t>(fault_ptr), zeroed, g_fault_context_provider ? g_fault_context_provider() : std::string());
     return true;
 }
+#endif
 
 static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT && IsDebuggerPresent()) {
@@ -1058,9 +1063,11 @@ static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
         if (access_violation_handler(ptr, is_writing)) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+#ifdef VITA3K_EMULATE_REFUSED_JIT_ACCESS
         if (g_refused_guest_access && g_emulate_refused_jit_access.load(std::memory_order_relaxed) && emulate_refused_jit_access(pExp, ptr, is_writing)) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+#endif
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
