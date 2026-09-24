@@ -52,7 +52,7 @@ static uint64_t hash_data(const void *data, size_t size) {
 }
 
 static bool seh_xxh3_update(XXH3_state_t *state, const void *p, uint32_t n) {
-#ifdef _WIN32
+#ifdef _MSC_VER // SEH; MinGW/clang Windows builds take the unguarded path
     __try {
         XXH3_64bits_update(state, p, n);
         return true;
@@ -66,7 +66,7 @@ static bool seh_xxh3_update(XXH3_state_t *state, const void *p, uint32_t n) {
 }
 
 static bool seh_memcpy(void *dst, const void *src, uint32_t n) {
-#ifdef _WIN32
+#ifdef _MSC_VER
     __try {
         memcpy(dst, src, n);
         return true;
@@ -246,7 +246,7 @@ static void hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32_t h
 }
 
 static bool seh_hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32_t height, uint32_t block_width, uint32_t block_height, uint32_t bpp, XXH3_state_t *hash_state) {
-#ifdef _WIN32
+#ifdef _MSC_VER
     __try {
         hash_unaligned_tiled(data, width, height, block_width, block_height, bpp, hash_state);
         return true;
@@ -260,7 +260,7 @@ static bool seh_hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32
 }
 
 static bool seh_hash_arbitrary_swizzled(const uint8_t *data, uint32_t width, uint32_t height, uint32_t texture_width, uint32_t texture_height, uint32_t texture_size, XXH3_state_t *hash_state) {
-#ifdef _WIN32
+#ifdef _MSC_VER
     __try {
         hash_arbitrary_swizzled(data, width, height, texture_width, texture_height, texture_size, hash_state);
         return true;
