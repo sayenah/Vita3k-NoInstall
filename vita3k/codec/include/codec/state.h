@@ -107,6 +107,28 @@ struct H264DecoderState : public DecoderState {
     bool output_yuvp3;
 
     bool is_stopped = true;
+    struct HeldPicture {
+        uint64_t au_hash = 0;
+        uint64_t pts = ~0ull;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        bool yuvp3 = false;
+        std::vector<uint8_t> data;
+    };
+    std::vector<HeldPicture> held;
+    uint64_t last_au_hash = 0;
+    struct SentAu {
+        uint64_t pts = ~0ull;
+        uint64_t hash = 0;
+    };
+    std::vector<SentAu> recent_sent; // newest last, at most 16
+    bool last_send_was_refeed = false;
+    static uint64_t au_hash(const uint8_t *p, uint32_t n);
+    uint64_t hash_for_pts(uint64_t pic_pts) const;
+    void stash_picture(const uint8_t *data, uint64_t pic_pts, uint32_t width, uint32_t height, bool yuvp3);
+    bool take_held_picture(uint8_t *out, uint64_t au_hash, uint32_t width, uint32_t height, bool yuvp3);
+    bool poll(uint8_t *data);
+    bool is_draining = false;
 
     static uint32_t buffer_size(DecoderSize size);
 
@@ -114,6 +136,9 @@ struct H264DecoderState : public DecoderState {
 
     bool send(const uint8_t *data, uint32_t size) override;
     bool receive(uint8_t *data, DecoderSize *size = nullptr) override;
+    // Signal end-of-stream and return one buffered picture, if available. Call repeatedly to
+    bool drain(uint8_t *data, DecoderSize *size = nullptr);
+    void flush() override;
     void configure(void *options);
     void set_res(const uint32_t width, const uint32_t height);
     void get_res(uint32_t &width, uint32_t &height);
@@ -282,7 +307,7 @@ struct PlayerState {
     ~PlayerState();
 };
 
-void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, int32_t in_pitch);
+void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, bool is_bgra, int32_t in_pitch);
 void convert_yuv_to_rgb(const uint8_t *yuv, uint8_t *rgba, uint32_t frame_width, const DecoderColorSpace color_space, bool is_bgra, MJpegPitch pitch[4]);
 int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t width, uint32_t height, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio);
 void copy_yuv_data_from_frame(AVFrame *frame, uint8_t *dest, const uint32_t width, const uint32_t height, bool is_p3);

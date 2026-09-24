@@ -15,6 +15,10 @@ add_library(
 
 target_include_directories(mem PUBLIC include)
 target_link_libraries(mem PUBLIC util)
+# Zydis comes with dynarmic's x64 backend; mem only uses it on x64 Windows
+if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+	target_link_libraries(mem PRIVATE Zydis::Zydis)
+endif()
 
 if(NOT ANDROID)
 	add_executable(

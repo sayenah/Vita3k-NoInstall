@@ -16,9 +16,9 @@ internal object AppRepository {
     private const val COMPAT_DB_URL =
         "https://github.com/Vita3K/compatibility/releases/download/compat_db/app_compat_db.xml.zip"
     private const val UPDATE_RELEASE_URL =
-        "https://api.github.com/repos/Vita3K/Vita3K/releases/tags/continuous"
+        "https://api.github.com/repos/sayenah/Vita3kPlus-NoInstall/releases/tags/latest"
     private const val UPDATE_PAGE_URL =
-        "https://github.com/Vita3K/Vita3K/releases/tag/continuous"
+        "https://github.com/sayenah/Vita3kPlus-NoInstall/releases/tag/latest"
     private val compatVersionRegex =
         Regex("""Last updated: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z)""")
     private val updateBuildRegex = Regex("""Vita3K Build:\s*(\d+)""")
@@ -157,6 +157,7 @@ internal object AppRepository {
         category = native.category,
         appVer = native.appVer,
         iconPath = native.iconPath.ifEmpty { null },
+        archivePath = native.archivePath.ifEmpty { null },
         hasCustomConfig = native.hasCustomConfig,
         compatibility = CompatibilityState.fromValue(native.compatibility),
         lastPlayed = native.lastPlayed,

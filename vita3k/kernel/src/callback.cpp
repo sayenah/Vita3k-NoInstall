@@ -22,6 +22,21 @@
 
 #include <mutex>
 
+static thread_local bool g_in_callback_wait = false;
+
+bool thread_in_callback_wait() {
+    return g_in_callback_wait;
+}
+
+CallbackWaitScope::CallbackWaitScope(bool enabled)
+    : previous(g_in_callback_wait) {
+    g_in_callback_wait = enabled;
+}
+
+CallbackWaitScope::~CallbackWaitScope() {
+    g_in_callback_wait = previous;
+}
+
 uint32_t process_callbacks(KernelState &kernel, SceUID thread_id) {
     ThreadStatePtr thread = kernel.get_thread(thread_id);
     if (thread->is_processing_callbacks)

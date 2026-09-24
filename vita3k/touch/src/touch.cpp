@@ -25,12 +25,15 @@
 #include <touch/state.h>
 #include <touch/touch.h>
 
+#include <util/log.h>
+
 #include <SDL3/SDL_events.h>
 
 #include <cstring>
 
-void set_rear_touchscreen(TouchState &state, bool is_back) {
-    state.touchscreen_port = static_cast<SceTouchPortType>(is_back);
+void set_touch_mode(TouchState &state, int mode) {
+    state.touchscreen_port = (mode == 1) ? SCE_TOUCH_PORT_BACK : SCE_TOUCH_PORT_FRONT;
+    state.touchscreen_both = (mode == 2);
 }
 
 static void reset_pinch(TouchState &state) {
@@ -42,20 +45,20 @@ static bool is_common_dialog_running(const EmuEnvState &emuenv) {
         && emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING;
 }
 
-static SceTouchData recover_touch_events(const EmuEnvState &emuenv) {
+static SceTouchData recover_touch_events(const EmuEnvState &emuenv, const int port) {
     const auto &touch = emuenv.touch;
     SceTouchData touch_data;
     memset(&touch_data, 0, sizeof(touch_data));
 
     for (uint8_t i = 0; i < touch.finger_count; i++) {
         touch_data.report[i].id = static_cast<uint8_t>(touch.finger_buffer[i].touchID);
-        touch_data.report[i].force = touch.force_touch_enabled[touch.touchscreen_port] ? 128 : 0;
+        touch_data.report[i].force = touch.force_touch_enabled[port] ? 128 : 0;
 
         float x = (touch.finger_buffer[i].x * emuenv.display.viewport_drawable_w - emuenv.display.viewport_x) / emuenv.display.viewport_w;
         float y = (touch.finger_buffer[i].y * emuenv.display.viewport_drawable_h - emuenv.display.viewport_y) / emuenv.display.viewport_h;
         touch_data.report[i].x = static_cast<uint16_t>(x * 1920);
 
-        if (touch.touchscreen_port == SCE_TOUCH_PORT_FRONT) {
+        if (port == SCE_TOUCH_PORT_FRONT) {
             touch_data.report[i].y = static_cast<uint16_t>(y * 1088);
         } else {
             touch_data.report[i].y = static_cast<uint16_t>(108 + y * 781);
@@ -67,17 +70,17 @@ static SceTouchData recover_touch_events(const EmuEnvState &emuenv) {
     return touch_data;
 }
 
-static SceTouchData recover_touchpad_events(const EmuEnvState &emuenv) {
+static SceTouchData recover_touchpad_events(const EmuEnvState &emuenv, const int port) {
     const auto &touch = emuenv.touch;
     SceTouchData touch_data;
     memset(&touch_data, 0, sizeof(touch_data));
 
     for (uint8_t i = 0; i < touch.touchpad_finger_count; i++) {
         touch_data.report[i].id = static_cast<uint8_t>(touch.touchpad_buffer[i].which);
-        touch_data.report[i].force = touch.force_touch_enabled[touch.touchscreen_port] ? 128 : 0;
+        touch_data.report[i].force = touch.force_touch_enabled[port] ? 128 : 0;
 
         touch_data.report[i].x = static_cast<uint16_t>(touch.touchpad_buffer[i].x * 1920);
-        if (touch.touchscreen_port == SCE_TOUCH_PORT_FRONT) {
+        if (port == SCE_TOUCH_PORT_FRONT) {
             touch_data.report[i].y = static_cast<uint16_t>(touch.touchpad_buffer[i].y * 1088);
         } else {
             touch_data.report[i].y = static_cast<uint16_t>(108 + touch.touchpad_buffer[i].y * 781);
@@ -101,16 +104,19 @@ void touch_vsync_update(EmuEnvState &emuenv) {
     constexpr bool on_android = false;
 #endif
     if (touch.finger_count > 0 || touch.touchpad_finger_count > 0 || on_android) {
-        SceTouchData touch_data = touch.is_touchpad ? recover_touchpad_events(emuenv) : recover_touch_events(emuenv);
-        touch_data.timeStamp = timestamp;
-
         SceTouchData *buffers = touch.touch_buffers[(touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED];
         for (int port = 0; port < 2; port++) {
             buffers[port].status = 0;
             buffers[port].reportNum = 0;
             buffers[port].timeStamp = timestamp;
         }
-        buffers[touch.touchscreen_port] = touch_data;
+        for (int port = 0; port < 2; port++) {
+            if (!touch.touchscreen_both && port != touch.touchscreen_port)
+                continue;
+            SceTouchData touch_data = touch.is_touchpad ? recover_touchpad_events(emuenv, port) : recover_touch_events(emuenv, port);
+            touch_data.timeStamp = timestamp;
+            buffers[port] = touch_data;
+        }
 
     } else {
         const auto &ts = emuenv.touch;
@@ -298,6 +304,7 @@ std::vector<SceFVector2> get_touchpad_fingers_pos(const TouchState &state, SceTo
 }
 
 int toggle_touchscreen(TouchState &state) {
+    state.touchscreen_both = false;
     if (state.touchscreen_port == SCE_TOUCH_PORT_FRONT) {
         state.touchscreen_port = SCE_TOUCH_PORT_BACK;
     } else {
@@ -308,8 +315,8 @@ int toggle_touchscreen(TouchState &state) {
 
 int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek) {
     memset(pData, 0, sizeof(SceTouchData) * count);
-    if (emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed))
-        return 0;
+
+    const bool input_blocked = emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed);
 
     const int port_idx = static_cast<int>(port);
 
@@ -330,7 +337,14 @@ int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port
         uint64_t vblank_count = emuenv.display.vblank_count.load();
         nb_returned_data = std::min<int>(count, vblank_count - emuenv.touch.last_vcount[port_idx]);
         emuenv.touch.last_vcount[port_idx] = vblank_count;
+        if ((count > 0) && (nb_returned_data < 1)) {
+            LOG_WARN_ONCE("sceTouchRead port {} had no buffer to return; answering 1 empty one", port_idx);
+            nb_returned_data = 1;
+        }
     }
+
+    if (input_blocked)
+        return nb_returned_data;
 
     int corr_buffer_idx;
     if (is_peek) {

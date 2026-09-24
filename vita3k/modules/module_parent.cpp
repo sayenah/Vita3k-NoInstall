@@ -23,6 +23,7 @@
 
 #include <cpu/functions.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/device.h>
 #include <io/state.h>
 #include <io/vfs.h>
@@ -160,6 +161,8 @@ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread
         auto lr = read_lr(cpu);
         log_import_call('H', nid, thread_id, hle_nid_blacklist, lr);
     }
+    set_last_import_call(nid, read_lr(cpu));
+
     const ImportFn *fn = resolve_import(nid);
     if (fn) {
         (*fn)(emuenv, cpu, thread_id);
@@ -169,7 +172,14 @@ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread
         write_reg(*thread->cpu, 0, 0);
 
         if (!emuenv.missing_nids.contains(nid) || LOG_UNK_NIDS_ALWAYS) {
-            LOG_ERROR("Import function for NID {} not found (thread name: {}, thread ID: {})", log_hex(nid), thread->name, thread_id);
+            std::string lib_name = "unknown library";
+            {
+                const std::lock_guard<std::mutex> guard(emuenv.kernel.export_nids_mutex);
+                const auto lib_it = emuenv.kernel.nid_libraries.find(nid);
+                if (lib_it != emuenv.kernel.nid_libraries.end())
+                    lib_name = lib_it->second;
+            }
+            LOG_ERROR("Import function for NID {} ({}) not found - RETURNING 0 (thread name: {}, thread ID: {}, LR: {})", log_hex(nid), lib_name, thread->name, thread_id, log_hex(read_lr(cpu)));
             if (!LOG_UNK_NIDS_ALWAYS)
                 emuenv.missing_nids.insert(nid);
         }
@@ -264,7 +274,16 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         }
     }
 
-    if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
+    // A mounted Game Bundle serves app0:/addcont0: modules from a decrypted temp tree, so they never
+    // exist on the host ux0/app path. The case-insensitive fallback below probes the host FS and bails
+    // with ENOENT (line ~283) *before* the mount read (line ~292) — but only on case-sensitive hosts
+    // (Android/Linux) where case_isens_find_enabled is set, which is why desktop worked and Android did
+    // not. Skip the host-FS fallback when the mount already covers this path; io.cpp::open_file checks
+    // the mount first for exactly this reason.
+    const bool covered_by_mount = emuenv.io.mount
+        && emuenv.io.mount->map_ux0_path(translated_module_path.generic_string()).has_value();
+
+    if (!covered_by_mount && emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
         // Attempt a case-insensitive file search.
         const auto original_translated_module_path = translated_module_path;
         const auto cached_path = find_in_cache(emuenv.io, string_utils::tolower(translated_module_path.string()));
@@ -287,10 +306,14 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
 
     vfs::FileBuffer module_buffer;
     bool res;
-    if (device == VitaIoDevice::app0)
-        res = vfs::read_app_file(module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
-    else
+    // Serve app0: modules from a mounted Game Bundle when covered; otherwise read from the host FS.
+    if (const auto handled = bundle::try_read_ux0_file(emuenv.io, translated_module_path, module_buffer)) {
+        res = *handled;
+    } else if (device == VitaIoDevice::app0) {
+        res = vfs::read_app_file(emuenv.io, module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
+    } else {
         res = vfs::read_file(device, module_buffer, emuenv.vita_fs_path, translated_module_path);
+    }
     if (!res) {
         LOG_ERROR("Failed to read module file {}", module_path);
         return SCE_ERROR_ERRNO_ENOENT;

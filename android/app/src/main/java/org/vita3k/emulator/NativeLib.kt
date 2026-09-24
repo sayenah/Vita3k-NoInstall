@@ -18,6 +18,8 @@ object NativeLib {
 
     // --- Initialization ---
     external fun prepareFrontend(): Boolean
+    external fun onTrimMemory(level: Int)
+    external fun logDiagnostics(text: String)
     external fun init(storagePath: String): Boolean
     external fun isInitialized(): Boolean
     external fun isOfficialBuild(): Boolean
@@ -27,6 +29,24 @@ object NativeLib {
     external fun getAppListDetailed(): Array<NativeAppInfo>
     external fun refreshAppsList()
 
+    /** The configured ROMs folders (legacy single-folder configs are folded in transparently). */
+    external fun getRomsFolders(): Array<String>
+
+    /** Adds a ROMs folder, persists, rescans, and returns the names of any files that failed to load. */
+    external fun addRomsFolder(path: String): Array<String>
+
+    /** Removes a ROMs folder, persists, and rescans (its games drop out of the list). */
+    external fun removeRomsFolder(path: String)
+
+    /** Sets the DLCs folder and persists it (DLC is mounted for the matching game at launch, not listed). */
+    external fun setDlcFolder(path: String)
+
+    /** Sets the Updates folder and persists it (an update overlays the base game at launch, not listed). */
+    external fun setUpdatesFolder(path: String)
+
+    /** Sets the License folder and persists it (the matching game's rifs are copied to ux0/license at launch). */
+    external fun setLicenseFolder(path: String)
+
     // --- App actions ---
     /**
      * Dispatches a single app action identified by its AppActionMask bit.
@@ -35,6 +55,11 @@ object NativeLib {
     external fun performAppAction(titleId: String, actionBit: Int): Boolean
     /** Returns a bitmask of available actions for the given title (AppActionMask bits). */
     external fun getAppActionAvailabilityMask(titleId: String): Int
+    /**
+     * Clears the shader cache for every title. Returns false when there was nothing to
+     * delete. The per-title equivalent is AppAction.DELETE_SHADER_CACHE.
+     */
+    external fun clearShaderCache(): Boolean
 
     // --- Firmware / Info ---
     external fun getAppVersion(): String

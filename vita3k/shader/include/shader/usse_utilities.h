@@ -42,7 +42,7 @@ struct SpirvUtilFunctions {
 
 spv::Id finalize(spv::Builder &b, spv::Id first, spv::Id second, const Swizzle4 swizz, spv::Id offset, const Imm4 dest_mask);
 spv::Id load(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand op, const Imm4 dest_mask, int shift_offset);
-void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, spv::Id source, std::uint8_t dest_mask, int off);
+void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, spv::Id source, std::uint8_t dest_mask, int off, bool raw_move = false);
 
 spv::Id unpack(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureState &features, spv::Id target, const DataType type, Swizzle4 swizz, const Imm4 dest_mask,
     const int offset);
@@ -55,13 +55,16 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
 
 spv::Id make_vector_or_scalar_type(spv::Builder &b, spv::Id component, int size);
 
+spv::Id extract_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id index);
+spv::Id insert_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id component, spv::Id index);
+
 spv::Id unwrap_type(spv::Builder &b, spv::Id type);
 
 spv::Id convert_to_float(spv::Builder &b, const SpirvUtilFunctions &utils, spv::Id opr, DataType type, bool normal);
 spv::Id convert_to_int(spv::Builder &b, const SpirvUtilFunctions &utils, spv::Id opr, DataType type, bool normal);
 
 spv::Id add_uvec2_uint(spv::Builder &b, spv::Id vec, spv::Id to_add);
-
+spv::Id add_uvec2_int(spv::Builder &b, spv::Id vec, spv::Id to_add_signed);
 size_t dest_mask_to_comp_count(shader::usse::Imm4 dest_mask);
 
 spv::Id create_access_chain(spv::Builder &b, const spv::StorageClass storage_class, const spv::Id base, const std::vector<spv::Id> &offsets);

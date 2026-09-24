@@ -7,6 +7,7 @@ on:
   pull_request:
     paths-ignore:
       - '**.md'
+  workflow_dispatch: # lets the "Update from upstream" workflow trigger a build on demand
 
 env:
   BUILD_CONFIG: Release
@@ -22,27 +23,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - platform: linux-x64
             runs_on: ubuntu-latest
-            platform: linux-x64
             arch: x86_64
             cmake_preset: ci-linux-clang-appimage
             linuxdeploy_command: /usr/local/bin/linuxdeploy-x86_64.AppImage
             cache_path: ''
             qt_install_deps: 'true'
 
-          - os: ubuntu-24.04-arm
+          - platform: linux-arm64
             runs_on: ubuntu-24.04-arm
-            platform: linux-arm64
             arch: aarch64
             cmake_preset: ci-linux-clang-appimage
             linuxdeploy_command: /usr/local/bin/linuxdeploy-aarch64.AppImage
             cache_path: ''
             qt_install_deps: 'true'
 
-          - os: windows-latest
+          - platform: windows-x64
             runs_on: windows-latest
-            platform: windows-x64
             arch: x86_64
             cmake_preset: ci-windows-msvc
             vcpkg_root: C:\vcpkg
@@ -50,23 +48,20 @@ jobs:
             cache_path: C:\vcpkg-binary-cache
             qt_install_deps: 'false'
 
-          - os: windows-11-arm
+          - platform: windows-arm64
             runs_on: windows-11-arm
-            platform: windows-arm64
             cmake_preset: ci-windows-msys2-clang
             msys2_env: CLANGARM64
             cache_path: C:\msys2-ccache
             qt_install_deps: 'false'
 
-          - os: macos-intel
-            platform: macos-x64
+          - platform: macos-x64
             runs_on: macos-latest
             cmake_preset: ci-macos-x64
             cache_path: ~/Library/Caches/ccache
             qt_install_deps: 'false'
 
-          - os: macos-arm64
-            platform: macos-arm64
+          - platform: macos-arm64
             runs_on: macos-latest
             cmake_preset: ci-macos-arm64
             cache_path: ~/Library/Caches/ccache
@@ -99,9 +94,9 @@ jobs:
         shell: pwsh
         env:
           VCPKG_ROOT: ${{ matrix.vcpkg_root }}
-          VCPKG_BINARY_CACHE: ${{ matrix.cache_path }}
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ matrix.cache_path }}
         run: |
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_BINARY_CACHE | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           .\.ci\setup-windows-msvc.ps1 -VcpkgTriplet '${{ matrix.vcpkg_triplet }}'
         if: matrix.platform == 'windows-x64'
 
@@ -110,7 +105,7 @@ jobs:
           arch: ${{ matrix.arch }}
         if: matrix.platform == 'windows-x64'
 
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
         if: startsWith(matrix.platform, 'linux-') || matrix.platform == 'windows-x64'
         with:
           disable_annotations: true
@@ -175,7 +170,7 @@ jobs:
         shell: bash
         env:
           VCPKG_ROOT: ${{ matrix.vcpkg_root }}
-          VCPKG_BINARY_CACHE: ${{ matrix.cache_path }}
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ matrix.cache_path }}
         run: bash ./.ci/build-desktop.sh --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }}
         if: matrix.platform == 'windows-x64'
 
@@ -223,7 +218,7 @@ jobs:
     name: Android
     runs-on: ubuntu-latest
     env:
-      VCPKG_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-binary-cache
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-binary-cache
 
     steps:
       - uses: actions/checkout@v7
@@ -234,13 +229,13 @@ jobs:
       - name: Restore vcpkg binary cache
         uses: actions/cache@v6
         with:
-          path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: vcpkg-bincache-android-${{ hashFiles('vcpkg.json', 'CMakeLists.txt', 'cmake/**', '.ci/**', 'android/app/build.gradle') }}
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-bincache-android-${{ hashFiles('vcpkg.json', 'CMakeLists.txt', 'cmake/**', '.ci/**', 'android/app/build.gradle', '.github/workflows/c-cpp.yml') }}
           restore-keys: |
             vcpkg-bincache-android-
 
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -254,12 +249,14 @@ jobs:
 
       - name: Set up Android SDK tools
         uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
       - name: Set up Android build environment
         env:
           VCPKG_ROOT: /usr/local/share/vcpkg
         run: |
-          mkdir -p "$VCPKG_BINARY_CACHE"
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           bash ./.ci/setup-android.sh
 
       - uses: hendrikmuhs/ccache-action@v1.2.23
@@ -354,3 +351,93 @@ jobs:
           repository: Vita3K
           name: "Automatic CI builds"
           body: "Corresponding commit: ${{ github.sha }}\nVita3K Build: ${{ env.BUILD_VARIABLE }}"
+
+  # Fork-specific: publish the built Android + Windows artifacts as this fork's "latest" GitHub
+  # Release, IN THE SAME RUN as the build. This replaces the old separate publish-release.yml, which
+  # fired on a `workflow_run` trigger — and GitHub suppresses that downstream event for builds the
+  # "Update from upstream" workflow starts via `gh workflow run` with the built-in GITHUB_TOKEN, so
+  # auto-update builds never actually published (the release sat stale even after a clean build).
+  # Publishing from inside the build run avoids that entirely: no cross-workflow event, no token
+  # suppression. Runs even when some matrix legs fail (the macOS runners fail on pre-existing infra)
+  # and publishes whatever artifacts exist. Never runs on pull requests.
+  publish-noinstall-release:
+    name: Publish NoInstall Release
+    needs: [desktop-build, android-build]
+    runs-on: ubuntu-latest
+    if: >
+      always() &&
+      github.repository == 'sayenah/Vita3kPlus-NoInstall' &&
+      github.ref == 'refs/heads/feature/game-bundle' &&
+      github.event_name != 'pull_request'
+    permissions:
+      contents: write # create/replace the "latest" release
+    concurrency:
+      group: publish-noinstall-release
+      cancel-in-progress: false
+    steps:
+      # Each artifact goes to its OWN directory (merge-multiple flattens the artifact's contents into
+      # that path). download-artifact@v8 extracts straight into `path` with no per-artifact subdir, so
+      # we must not rely on a subdirectory name -- we package from these fixed paths instead.
+      - name: Download Android artifact
+        continue-on-error: true # a failed platform simply won't have an artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: vita3k-*-android
+          path: dl/android
+          merge-multiple: true
+
+      - name: Download Windows artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: vita3k-*-windows-x64
+          path: dl/windows
+          merge-multiple: true
+
+      - name: Package downloads
+        run: |
+          set -e
+          mkdir -p out
+          apk=$(find dl/android -type f -name '*.apk' 2>/dev/null | head -1)
+          if [ -n "$apk" ]; then
+            cp "$apk" "out/Vita3kPlus-NoInstall.apk"
+            echo "Android APK packaged."
+          else
+            echo "::warning::no APK found in the build artifacts"
+          fi
+          if [ -d dl/windows ] && [ -n "$(ls -A dl/windows 2>/dev/null)" ]; then
+            (cd dl/windows && zip -qr "$GITHUB_WORKSPACE/out/Vita3kPlus-NoInstall-windows-x64.zip" .)
+            echo "Windows zip packaged."
+          else
+            echo "::warning::no windows-x64 build found in the artifacts"
+          fi
+          ls -la out
+
+      # The in-app update check (desktop and Android) reads "Vita3K Build: <n>" from the release notes
+      # and compares it with the app's own build number, which is the commit count of the built tree.
+      - name: Checkout (for the build number)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          path: src
+
+      - name: Publish/refresh the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ github.sha }}"
+          BUILD=$(git -C src rev-list --count "$SHA")
+          PLUS=$(git -C src show "$SHA:.github/vita3k-plus.ref" 2>/dev/null || true)
+          if [ -z "$(ls -A out 2>/dev/null)" ]; then
+            echo "::warning::no Android/Windows artifacts on this build run -- nothing to publish, leaving the existing release in place"
+            exit 0
+          fi
+          gh release delete latest -R "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create latest -R "${{ github.repository }}" out/* \
+            --title "Vita3K+ NoInstall build ${BUILD}" \
+            --notes "Automatically built from commit \`${SHA}\`${PLUS:+, with Vita3K-Plus enhancements up to [\`${PLUS:0:8}\`](https://github.com/nckstwrt/Vita3K-Plus/commit/${PLUS})}.
+
+          Vita3K Build: ${BUILD}
+
+          - **Android:** download \`Vita3kPlus-NoInstall.apk\` and install it (allow installing from your browser/files app).
+          - **Windows:** download \`Vita3kPlus-NoInstall-windows-x64.zip\`, unzip, and run \`bin/Vita3K.exe\`."

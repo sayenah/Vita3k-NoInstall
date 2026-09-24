@@ -51,17 +51,18 @@ AboutDialog::AboutDialog(EmuEnvState &emuenv, QWidget *parent)
     m_ui->version_label->setText(tr("Version: %1").arg(version));
 
     m_ui->description_label->setText(tr(
-        "Vita3K is the world's first functional PS Vita\u2122/PS TV\u2122 emulator, "
-        "open-source and written in C++ for Windows, Linux, macOS, and Android.\n"
-        "Visit our website at <a href=\"https://vita3k.org/quickstart.html\">vita3k.org</a> for more info. "
-        "If you're interested in contributing, check out our <a href=\"https://github.com/Vita3K/Vita3K\">GitHub</a>. "
-        "If you want to support us, you can donate via <a href=\"https://ko-fi.com/vita3k\">Ko-fi</a>."));
+        "Vita3K+ NoInstall plays PS Vita\u2122 games straight from .zip, .7z and .pkg files, without installing them. "
+        "Report issues on its <a href=\"https://github.com/sayenah/Vita3kPlus-NoInstall\">GitHub</a>.\n"
+        "It is a fork of <a href=\"https://github.com/Vita3K/Vita3K\">Vita3K</a>, the open-source PS Vita\u2122/PS TV\u2122 emulator, "
+        "and includes the game fixes from <a href=\"https://github.com/nckstwrt/Vita3K-Plus\">Vita3K-Plus</a> by nckstwrt. "
+        "Visit <a href=\"https://vita3k.org/quickstart.html\">vita3k.org</a> for setup guides, "
+        "or support the Vita3K team on <a href=\"https://ko-fi.com/vita3k\">Ko-fi</a>."));
 
     m_ui->credit_label->setText(
         tr("Icon by %1").arg(QStringLiteral("<a href=\"https://gordonmackayillustration.blogspot.com\">Gordon Mackay</a>")));
 
     connect(m_ui->github_button, &QPushButton::clicked, [] {
-        QDesktopServices::openUrl(QUrl("https://github.com/Vita3K/Vita3K"));
+        QDesktopServices::openUrl(QUrl("https://github.com/sayenah/Vita3kPlus-NoInstall"));
     });
     connect(m_ui->website_button, &QPushButton::clicked, [] {
         QDesktopServices::openUrl(QUrl("https://vita3k.org"));

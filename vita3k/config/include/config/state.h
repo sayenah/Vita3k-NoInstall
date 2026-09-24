@@ -29,10 +29,15 @@ struct Config {
     std::optional<fs::path> content_path;
     std::optional<std::string> run_app_path;
     std::optional<std::string> recompile_shader_path;
+    std::optional<std::string> decode_at9_path;
     std::optional<std::string> delete_title_id;
     std::optional<std::string> pkg_path;
     std::optional<std::string> pkg_zrif;
     std::optional<std::string> pup_path;
+    // Dev/testing: path to a Game Bundle directory to mount and boot directly (P0 directory backend).
+    std::optional<fs::path> bundle_path;
+    // Path to a self-contained NoNpDrm .pkg to decrypt-to-temp and play without permanently installing.
+    std::optional<fs::path> play_pkg_path;
     std::optional<bool> system_music;
 
     // Setting not present in the YAML file
@@ -71,14 +76,18 @@ struct Config {
 #ifdef __ANDROID__
         std::string custom_driver_name{};
 #endif
-        bool high_accuracy = false;
+        bool high_accuracy = true;
         float resolution_multiplier = 1.0f;
         bool disable_surface_sync = false;
         std::string screen_filter = "Bilinear";
-        std::string memory_mapping = "double-buffer";
+        std::string memory_mapping = VITA3K_DEFAULT_MEMORY_MAPPING;
         bool v_sync = true;
         int anisotropic_filtering = 1;
-        bool async_pipeline_compilation = true;
+        bool async_pipeline_compilation = false;
+        bool accurate_thread_scheduling = true;
+        bool preempt_on_wake = false;
+        int preempt_on_wake_us = 1000;
+        int guest_cores = 3;
         bool import_textures = false;
         bool export_textures = false;
         bool export_as_png = false;
@@ -98,7 +107,7 @@ struct Config {
         bool log_active_shaders = false;
         bool log_uniforms = false;
         bool color_surface_debug = false;
-        bool validation_layer = true;
+        bool validation_layer = false;
         bool tracy_primitive_impl = false;
         std::vector<std::string> tracy_advanced_profiling_modules;
     };

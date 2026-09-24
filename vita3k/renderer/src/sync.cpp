@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/state.h>
@@ -124,13 +125,30 @@ void finish(State &state, Context *context) {
     // Push a callback request on the queue and wait for it to be treated
     if (state.current_backend == Backend::Vulkan && state.features.enable_memory_mapping) {
         auto &vk_state = static_cast<vulkan::VKState &>(state);
-        std::promise<void> promise;
-        auto callback = [&]() {
-            promise.set_value();
-        };
-        vk_state.request_queue.push(vulkan::CallbackRequest{ new vulkan::CallbackRequestFunction(callback) });
-        promise.get_future().wait();
+        auto promise = std::make_shared<std::promise<void>>();
+        std::future<void> future = promise->get_future();
+        vk_state.request_queue.push(vulkan::CallbackRequest{
+            new vulkan::CallbackRequestFunction([promise]() { promise->set_value(); }), /* wait_for_gpu = */ true });
+
+        while (future.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
+            if (state.render_abort.load(std::memory_order_relaxed) || vk_state.request_queue.is_aborted())
+                return;
+        }
     }
+}
+
+// A list abandoned around or after a wait began may carry the signal that the wait is blocked on
+bool signal_may_be_lost(State &state, const int64_t wait_start_epoch_ms) {
+    if (!recover_from_abandoned_lists)
+        return false;
+    // a signal this late is a wedge rather than a slow frame, and an abandon this old can still be ours
+    constexpr int64_t MIN_WAIT_MS = 2000;
+    constexpr int64_t ABANDON_WINDOW_MS = 60000;
+    const int64_t abandoned = state.last_abandon_epoch_ms.load(std::memory_order_relaxed);
+    if (abandoned == 0)
+        return false;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return now - wait_start_epoch_ms >= MIN_WAIT_MS && abandoned + ABANDON_WINDOW_MS >= wait_start_epoch_ms;
 }
 
 int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
@@ -142,10 +160,21 @@ int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
     }
 
     // unblock threads if shutting down
-    state.command_finish_one.wait(lock, [&]() {
+    const auto ready = [&]() {
         return state.render_abort.load(std::memory_order_relaxed)
             || ((*status == signal) ^ wake_on_unequal);
-    });
+    };
+    const int64_t wait_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    while (!state.command_finish_one.wait_for(lock, std::chrono::milliseconds(250), ready)) {
+        if (!signal_may_be_lost(state, wait_start_ms))
+            continue;
+        // the command that would complete this status was abandoned, so a stale status beats never returning
+        static std::atomic<uint32_t> released{ 0 };
+        const uint32_t n = released.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8 || (n & 1023) == 0)
+            LOG_ERROR("[CMDLOST] a command list was abandoned while waiting for its completion status; releasing the waiter (#{})", n);
+        break;
+    }
     return *status;
 }
 

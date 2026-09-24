@@ -23,6 +23,6 @@ else
 fi
 
 echo "Detected architecture: $DETECTED_ARCH"
-export LDAI_UPDATE_INFORMATION="gh-releases-zsync|Vita3K|Vita3K|continuous|Vita3K-$(echo "$DETECTED_ARCH").AppImage.zsync"
+export LDAI_UPDATE_INFORMATION="gh-releases-zsync|sayenah|Vita3kPlus-NoInstall|latest|Vita3K-$(echo "$DETECTED_ARCH").AppImage.zsync"
 
 $@

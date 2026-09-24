@@ -18,6 +18,9 @@
 #include "vkutil/vkutil.h"
 
 #include "util/fs.h"
+#include "util/log.h"
+
+#include <atomic>
 
 namespace vkutil {
 
@@ -183,6 +186,18 @@ vk::ComponentMapping color_to_texture_swizzle(const vk::ComponentMapping &swizzl
             }
         }
     }
+
+    // A read that resolves to no source channel at all samples a constant
+    if (result[0] == vk::ComponentSwizzle::eZero && result[1] == vk::ComponentSwizzle::eZero
+        && result[2] == vk::ComponentSwizzle::eZero && result[3] == vk::ComponentSwizzle::eZero) {
+        static std::atomic<uint32_t> blanked{ 0 };
+        const uint32_t n = blanked.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 4 || (n & 4095) == 0)
+            LOG_WARN("[SWIZBLANK] surface swizzle ({},{},{},{}) cannot satisfy texture swizzle ({},{},{},{}) - the sample reads all zero (#{})",
+                vk::to_string(color[0]), vk::to_string(color[1]), vk::to_string(color[2]), vk::to_string(color[3]),
+                vk::to_string(texture[0]), vk::to_string(texture[1]), vk::to_string(texture[2]), vk::to_string(texture[3]), n);
+    }
+
     return result_comp;
 }
 

@@ -49,6 +49,8 @@ EXPORT(int, sceFiosOverlayAddForProcess02, SceUID processId, SceFiosProcessOverl
     if (pOverlay->type != SCE_FIOS_OVERLAY_TYPE_OPAQUE)
         LOG_WARN("Using unimplemented overlay type {}.", fmt::underlying(pOverlay->type));
 
+    LOG_INFO("[FIOSOVL] add type={} order={} pid={} dst='{}' src='{}'", fmt::underlying(pOverlay->type), pOverlay->order, pOverlay->process_id, pOverlay->dst, pOverlay->src);
+
     *pOutID = create_overlay(emuenv.io, pOverlay);
 
     return SCE_FIOS_OK;
@@ -108,7 +110,7 @@ EXPORT(int, sceFiosOverlayResolveSync02) {
 
 EXPORT(int, sceFiosOverlayResolveWithRangeSync02, SceUID processId, SceFiosOverlayResolveMode resolveFlag, const char *pInPath, char *pOutPath, SceUInt32 maxPath, SceUInt32 min_order, SceUInt32 max_order) {
     TRACY_FUNC(sceFiosOverlayResolveWithRangeSync02, processId, resolveFlag, pInPath, pOutPath, maxPath, min_order, max_order);
-    const std::string resolved = resolve_path(emuenv.io, pInPath, min_order, max_order);
+    const std::string resolved = resolve_path(emuenv.io, pInPath, emuenv.vita_fs_path, min_order, max_order);
     strncpy(pOutPath, resolved.c_str(), maxPath);
 
     return SCE_FIOS_OK;

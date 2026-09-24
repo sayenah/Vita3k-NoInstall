@@ -19,6 +19,7 @@
 
 #include <emuenv/app_util.h>
 
+#include <io/bundle.h>
 #include <io/device.h>
 #include <io/functions.h>
 #include <io/io.h>
@@ -162,6 +163,12 @@ EXPORT(int, sceAppUtilBgdlGetStatus) {
 }
 
 static bool is_addcont_exist(EmuEnvState &emuenv, const SceChar8 *path) {
+    // DLC may live in a mounted Game Bundle rather than ux0/addcont on the host FS. try_exists_ux0
+    // reports a directory as existing only when non-empty, matching the host check below.
+    const fs::path addcont_ux0_rel = fs::path(emuenv.io.device_paths.addcont0) / reinterpret_cast<const char *>(path);
+    if (const auto handled = bundle::try_exists_ux0(emuenv.io, addcont_ux0_rel))
+        return *handled;
+
     const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / reinterpret_cast<const char *>(path) };
     return (fs::exists(drm_content_id_path) && (!fs::is_empty(drm_content_id_path)));
 }
@@ -517,16 +524,18 @@ EXPORT(SceInt32, sceAppUtilSystemParamGetInt, SceSystemParamId paramId, SceInt32
 
     switch (paramId) {
     case SCE_SYSTEM_PARAM_ID_LANG:
-        *value = (SceSystemParamLang)emuenv.cfg.sys_lang;
+        *value = (SceSystemParamLang)emuenv.cfg.current_config.sys_lang;
+        LOG_INFO("sceAppUtilSystemParamGetInt(LANG) -> {} (per-game={}, global={})",
+            *value, emuenv.cfg.current_config.sys_lang, emuenv.cfg.sys_lang);
         return 0;
     case SCE_SYSTEM_PARAM_ID_ENTER_BUTTON:
-        *value = (SceSystemParamEnterButtonAssign)emuenv.cfg.sys_button;
+        *value = (SceSystemParamEnterButtonAssign)emuenv.cfg.current_config.sys_button;
         return 0;
     case SCE_SYSTEM_PARAM_ID_DATE_FORMAT:
-        *value = (SceSystemParamDateFormat)emuenv.cfg.sys_date_format;
+        *value = (SceSystemParamDateFormat)emuenv.cfg.current_config.sys_date_format;
         return 0;
     case SCE_SYSTEM_PARAM_ID_TIME_FORMAT:
-        *value = (SceSystemParamTimeFormat)emuenv.cfg.sys_time_format;
+        *value = (SceSystemParamTimeFormat)emuenv.cfg.current_config.sys_time_format;
         return 0;
     case SCE_SYSTEM_PARAM_ID_TIME_ZONE:
     case SCE_SYSTEM_PARAM_ID_SUMMERTIME:

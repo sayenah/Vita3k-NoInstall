@@ -119,6 +119,11 @@ public:
         reset_repeat_increase();
     }
 
+    void seed_entry_populated_pa(std::uint32_t reg_count) {
+        for (std::uint32_t r = 0; r < reg_count; r++)
+            m_vpck_written_bytes[(static_cast<std::uint32_t>(RegisterBank::PRIMATTR) << 24) | (r & 0xFFFFFF)] = 0xF;
+    }
+
 private:
     //
     // Translation helpers
@@ -155,6 +160,9 @@ private:
         }
         if (repeat_mode == RepeatMode::EXTERNAL && bank != RegisterBank::FPINTERNAL) {
             return repeat_index * 4;
+        }
+        if (repeat_mode == RepeatMode::EXTERNAL) {
+            return repeat_index;
         }
         if (repeat_mode == RepeatMode::SLMSI) {
             auto inc = repeat_increase[op.index][repeat_index];
@@ -197,7 +205,14 @@ private:
 
     bool m_second_program{ false };
 
-    spv::Id do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask);
+    // per 32-bit register word - a mask of bytes a VPCK has written (a f16 lane covers 2 bytes, u8 lane 1)
+    std::map<uint32_t, std::uint8_t> m_vpck_written_bytes;
+    bool m_store_from_vpck{ false };
+    // a sampled texture leaves real data in its destination therefore a later partial vpck must preserve it
+    bool m_store_from_texture_sample{ false };
+    bool m_store_is_raw_move{ false };
+
+    spv::Id do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask, int src1_repeat_offset = 0, int src2_repeat_offset = 0);
 
 public:
     void set_secondary_program(const bool is_it) {

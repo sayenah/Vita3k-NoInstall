@@ -19,9 +19,11 @@
 #include "interface.h"
 
 #include <app/functions.h>
+#include <codec/state.h>
 #include <config/functions.h>
 #include <config/version.h>
 #include <emuenv/state.h>
+#include <fstream>
 #include <gui-qt/gui_language.h>
 #include <gui-qt/gui_settings.h>
 #include <gui-qt/log_widget.h>
@@ -29,13 +31,16 @@
 #include <gui-qt/persistent_settings.h>
 #include <include/cpu.h>
 #include <include/environment.h>
+#include <io/bundle.h>
 #include <io/state.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <regex>
 #include <shader/spirv_recompiler.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
 
@@ -122,13 +127,69 @@ int main(int argc, char *argv[]) {
     EmuEnvState emuenv;
     const auto config_err = config::init_config(cfg, argc, argv, root_paths, portable);
 
-    fs::create_directories(cfg.get_vita_fs_path());
-
     if (config_err != Success) {
         if (config_err == QuitRequested) {
             if (cfg.recompile_shader_path.has_value()) {
                 LOG_INFO("Recompiling {}", *cfg.recompile_shader_path);
                 shader::convert_gxp_to_glsl_from_filepath(*cfg.recompile_shader_path);
+            }
+            if (cfg.decode_at9_path.has_value()) {
+                const std::string &tap_path = *cfg.decode_at9_path;
+                uint32_t config_data = 0;
+                std::smatch cfg_match;
+                if (std::regex_search(tap_path, cfg_match, std::regex("_c([0-9A-Fa-f]{8})")))
+                    config_data = static_cast<uint32_t>(std::stoul(cfg_match[1].str(), nullptr, 16));
+                std::ifstream tap_in(tap_path, std::ios::binary);
+                if (!tap_in || !config_data) {
+                    LOG_ERROR("decode-at9: cannot open {} or no _c<config> in the name", tap_path);
+                    return 1;
+                }
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(tap_in)), std::istreambuf_iterator<char>());
+                Atrac9DecoderState decoder(config_data);
+                const uint32_t superframe_size = decoder.get(DecoderQuery::AT9_SUPERFRAME_SIZE);
+                const uint32_t frames_in_sf = decoder.get(DecoderQuery::AT9_FRAMES_IN_SUPERFRAME);
+                const uint32_t samples_per_frame = decoder.get(DecoderQuery::AT9_SAMPLE_PER_FRAME);
+                const uint32_t channels = decoder.get(DecoderQuery::CHANNELS);
+                LOG_INFO("decode-at9: {} bytes, config=0x{:08X} superframe={} frames={} samples/frame={} ch={}",
+                    bytes.size(), config_data, superframe_size, frames_in_sf, samples_per_frame, channels);
+                std::vector<uint8_t> pcm(static_cast<size_t>(samples_per_frame) * sizeof(int16_t) * channels);
+                std::string row;
+                uint32_t sf_index = 0, errors = 0, silent_run = 0, transitions = 0;
+                for (size_t off = 0; off + superframe_size <= bytes.size(); off += superframe_size, sf_index++) {
+                    const uint8_t *in = bytes.data() + off;
+                    float sf_peak = 0.0f;
+                    for (uint32_t f = 0; f < frames_in_sf; f++) {
+                        if (!decoder.send(in, 0)) {
+                            errors++;
+                            break;
+                        }
+                        DecoderSize dsz;
+                        decoder.receive(pcm.data(), &dsz);
+                        const int16_t *sp = reinterpret_cast<const int16_t *>(pcm.data());
+                        for (uint32_t k = 0; k < samples_per_frame * channels; k++)
+                            sf_peak = std::max(sf_peak, std::abs(sp[k]) / 32768.0f);
+                        in += decoder.get_es_size();
+                    }
+                    const bool silent = sf_peak <= 0.0001f;
+                    if (silent)
+                        silent_run++;
+                    else {
+                        if (silent_run >= 12) {
+                            LOG_INFO("decode-at9: silent run of {} superframes ended at sf#{}", silent_run, sf_index);
+                            transitions++;
+                        }
+                        silent_run = 0;
+                    }
+                    row += fmt::format(" {:.4f}", sf_peak);
+                    if ((sf_index % 16) == 15) {
+                        LOG_INFO("decode-at9: sf#{:6}:{}", sf_index - 15, row);
+                        row.clear();
+                    }
+                }
+                if (!row.empty())
+                    LOG_INFO("decode-at9: sf#{:6}:{}", (sf_index / 16) * 16, row);
+                LOG_INFO("decode-at9: DONE {} superframes, {} decode errors, final silent run {}, {} long-silence->audio transitions",
+                    sf_index, errors, silent_run, transitions);
             }
             if (cfg.delete_title_id.has_value()) {
                 LOG_INFO("Deleting title id {}", *cfg.delete_title_id);
@@ -138,12 +199,14 @@ int main(int argc, char *argv[]) {
                 fs::remove_all(root_paths.get_cache_path() / "shaders" / *cfg.delete_title_id);
             }
             if (cfg.pup_path.has_value()) {
+                fs::create_directories(cfg.get_vita_fs_path());
                 LOG_INFO("Installing firmware file {}", *cfg.pup_path);
                 install_pup(cfg.get_vita_fs_path(), *cfg.pup_path, [](uint32_t progress) {
                     LOG_INFO("Firmware installation progress: {}%", progress);
                 });
             }
             if (cfg.pkg_path.has_value() && cfg.pkg_zrif.has_value()) {
+                fs::create_directories(cfg.get_vita_fs_path());
                 LOG_INFO("Installing pkg from {} ", *cfg.pkg_path);
                 emuenv.cache_path = root_paths.get_cache_path().generic_path();
                 emuenv.vita_fs_path = cfg.get_vita_fs_path();
@@ -155,6 +218,8 @@ int main(int argc, char *argv[]) {
         LOG_ERROR("Failed to initialise config");
         return InitConfigFailed;
     }
+
+    fs::create_directories(cfg.get_vita_fs_path());
 
     gui::i18n::apply_ui_language(app, cfg.user_lang, emuenv.static_assets_path);
 
@@ -250,6 +315,65 @@ int main(int argc, char *argv[]) {
         if (!app::init_apps_list(emuenv)) {
             LOG_ERROR("Failed to refresh apps list after content install.");
         }
+    }
+
+    // Frontends (ES-DE etc.) don't need to pick the right flag: --bundle pointed at an archive FILE
+    // behaves like --play-pkg, and --play-pkg pointed at a DIRECTORY behaves like --bundle.
+    if (emuenv.cfg.bundle_path.has_value() && !emuenv.cfg.play_pkg_path.has_value() && fs::is_regular_file(*emuenv.cfg.bundle_path)) {
+        emuenv.cfg.play_pkg_path = emuenv.cfg.bundle_path;
+        emuenv.cfg.bundle_path.reset();
+    } else if (emuenv.cfg.play_pkg_path.has_value() && !emuenv.cfg.bundle_path.has_value() && fs::is_directory(*emuenv.cfg.play_pkg_path)) {
+        emuenv.cfg.bundle_path = emuenv.cfg.play_pkg_path;
+        emuenv.cfg.play_pkg_path.reset();
+    }
+
+    // Dev/testing (P0): mount a Game Bundle directory and boot it directly, with no install into
+    // ux0/app. A synthetic apps-list entry lets the normal boot path (set_app_info -> load_app)
+    // resolve to the mounted bundle; the mount serves app0:/addcont0: reads (see io/bundle.h).
+    // NB: app::init above moved the local `cfg` into emuenv.cfg, so read the bundle path and set
+    // run_app_path on emuenv.cfg — that is the live config MainWindow boots from.
+    if (emuenv.cfg.bundle_path.has_value()) {
+        bundle::Manifest manifest;
+        std::string bundle_error;
+        auto backend = bundle::open_directory_backend(*emuenv.cfg.bundle_path, manifest, bundle_error);
+        if (!backend) {
+            LOG_CRITICAL("Failed to mount Game Bundle at {}: {}", emuenv.cfg.bundle_path->string(), bundle_error);
+            return 1;
+        }
+        emuenv.io.mount = bundle::make_mount(backend, manifest);
+
+        app::AppEntry entry;
+        entry.title_id = manifest.title_id;
+        entry.path = manifest.title_id;
+        entry.addcont = manifest.title_id;
+        entry.savedata = manifest.title_id;
+        entry.content_id = manifest.content_id;
+        entry.category = manifest.category.empty() ? "gd" : manifest.category;
+        entry.title = manifest.title_id; // real title is loaded from the bundle's param.sfo at boot
+        entry.stitle = manifest.title_id;
+        entry.app_ver = "N/A";
+        entry.parental_level = "N/A";
+        {
+            std::lock_guard<std::mutex> lock(emuenv.app.apps_list.mutex);
+            auto &apps = emuenv.app.apps_list.apps;
+            std::erase_if(apps, [&](const app::AppEntry &a) { return a.path == entry.path; });
+            apps.push_back(entry);
+        }
+        emuenv.cfg.run_app_path = manifest.title_id;
+        LOG_INFO("Mounted Game Bundle [{}] from {}; booting directly", manifest.title_id, emuenv.cfg.bundle_path->string());
+    }
+
+    // Play a self-contained NoNpDrm pkg with no permanent install: decrypt to temp, mount, boot;
+    // the temp tree is deleted when the game stops (io_deinit).
+    if (emuenv.cfg.play_pkg_path.has_value()) {
+        std::string play_error;
+        const std::string title_id = mount_pkg_for_play(emuenv, *emuenv.cfg.play_pkg_path, play_error);
+        if (title_id.empty()) {
+            LOG_CRITICAL("Failed to play pkg {}: {}", emuenv.cfg.play_pkg_path->string(), play_error);
+            return 1;
+        }
+        emuenv.cfg.run_app_path = title_id;
+        LOG_INFO("Playing pkg [{}] without install; booting directly", title_id);
     }
 
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");

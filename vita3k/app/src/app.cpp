@@ -21,6 +21,7 @@
 #include <config/functions.h>
 #include <config/state.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/functions.h>
 #include <io/state.h>
 #include <packages/license.h>
@@ -274,9 +275,25 @@ void prepare_game_launch_overlay(EmuEnvState &emuenv) {
     renderer.precompile_requested = false;
     renderer.precompile_complete.store(false, std::memory_order_relaxed);
 
-    const auto bg_path = emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_sys/pic0.png";
-    if (fs::exists(bg_path))
-        renderer.precompile_bg_path = fs_utils::path_to_utf8(bg_path);
+    // pic0 (live-area background) may live in a mounted Game Bundle. The renderer consumes a host
+    // path string, so extract the bundle copy to a cache file and point precompile_bg_path at it.
+    const fs::path pic0_ux0_rel = fs::path("app") / emuenv.io.app_path / "sce_sys/pic0.png";
+    std::vector<uint8_t> pic0_data;
+    if (const auto from_bundle = bundle::try_read_ux0_file(emuenv.io, pic0_ux0_rel, pic0_data)) {
+        if (*from_bundle && !pic0_data.empty()) {
+            const auto cache_dir = emuenv.cache_path / "bundle" / emuenv.io.title_id;
+            fs::create_directories(cache_dir);
+            const auto cached_pic0 = cache_dir / "pic0.png";
+            fs::ofstream out(cached_pic0, std::ios::out | std::ios::binary);
+            out.write(reinterpret_cast<const char *>(pic0_data.data()), static_cast<std::streamsize>(pic0_data.size()));
+            out.close();
+            renderer.precompile_bg_path = fs_utils::path_to_utf8(cached_pic0);
+        }
+    } else {
+        const auto bg_path = emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_sys/pic0.png";
+        if (fs::exists(bg_path))
+            renderer.precompile_bg_path = fs_utils::path_to_utf8(bg_path);
+    }
 
     if (renderer::get_shaders_cache_hashs(renderer) && emuenv.cfg.shader_cache) {
         renderer.precompile_queue = renderer.shaders_cache_hashs;

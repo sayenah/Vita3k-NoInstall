@@ -31,6 +31,7 @@ namespace gxm {
 SceGxmColorBaseFormat get_base_format(SceGxmColorFormat src);
 size_t bits_per_pixel(SceGxmColorBaseFormat base_format);
 size_t get_stride_in_bytes(const SceGxmColorFormat src, const std::size_t stride_in_pixels);
+int one_channel_source_component(SceGxmColorFormat src);
 
 // Textures.
 uint32_t get_width(const SceGxmTexture &texture);
@@ -43,6 +44,7 @@ uint32_t get_stride_in_bytes(const SceGxmTexture &texture);
 uint32_t bits_per_pixel(SceGxmTextureBaseFormat base_format);
 // get the size of the first mip of the first face
 uint32_t texture_size_first_mip(const SceGxmTexture &texture);
+uint32_t texture_size(const SceGxmTexture &texture);
 bool is_bcn_format(SceGxmTextureBaseFormat base_format);
 bool is_pvrt_format(SceGxmTextureBaseFormat base_format);
 bool is_block_compressed_format(SceGxmTextureBaseFormat base_format);

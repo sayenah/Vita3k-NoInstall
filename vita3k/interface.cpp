@@ -27,12 +27,14 @@
 #include <display/functions.h>
 #include <display/state.h>
 #include <emuenv/state.h>
+#include <io/bundle.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
 #include <lang/state.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <packages/vci.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
@@ -46,6 +48,7 @@
 #include <util/vector_utils.h>
 #include <util/vita_theme_utils.h>
 
+#include <cpu/functions.h>
 #include <gdbstub/functions.h>
 #include <stb_image_write.h>
 
@@ -55,6 +58,7 @@
 
 #include "patch/patch.h"
 
+#include <chrono>
 #include <memory>
 #include <regex>
 
@@ -169,12 +173,19 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     std::string theme_path = "theme.xml";
     vfs::FileBuffer buffer, theme;
 
+    LOG_INFO("Installing archive content '{}'", content_path.empty() ? "<archive root>" : content_path);
+
     const auto is_theme = mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + theme_path).c_str(), &write_to_buffer, &theme, 0);
     const std::string theme_root_name = fallback_theme_root_name(content_path);
 
+    LOG_INFO("Reading {}{} from archive...", content_path, sfo_path);
     auto output_path{ emuenv.vita_fs_path / "ux0" };
     if (mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0)) {
-        sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
+        LOG_INFO("param.sfo read ({} bytes)", buffer.size());
+        if (!sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang)) {
+            LOG_ERROR("Rejecting content '{}': param.sfo failed to parse ({} bytes)", content_path, buffer.size());
+            return false;
+        }
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
     } else if (is_theme) {
@@ -185,6 +196,8 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
         return false;
     }
 
+    LOG_INFO("Content {} [{}] installs to {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, output_path);
+
     const auto created = fs::create_directories(output_path);
     if (!created) {
         if (reinstall_callback) {
@@ -193,7 +206,10 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
                 return true;
             }
         }
+        const auto remove_start = std::chrono::steady_clock::now();
+        LOG_INFO("Removing previous install at {} before reinstall...", output_path);
         fs::remove_all(output_path);
+        LOG_INFO("Previous install removed in {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - remove_start).count());
     }
 
     float file_progress = 0;
@@ -205,6 +221,7 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     };
 
     mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
+    LOG_INFO("Extracting {} archive file(s) to {}...", num_files, output_path);
     for (mz_uint i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat file_stat;
         if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat)) {
@@ -277,6 +294,17 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
 }
 
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
+    if (string_utils::tolower(archive_path.extension().string()) == ".vci") {
+        const auto vci_progress = [&](float pct) {
+            if (progress_callback)
+                progress_callback({ 1.f, 1.f, pct });
+        };
+        const bool state = install_vci(archive_path, emuenv, vci_progress);
+        std::vector<ContentInfo> content_installed{};
+        content_installed.push_back({ emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, archive_path.string(), state });
+        return content_installed;
+    }
+
     FILE *vpk_fp = FOPEN(archive_path.c_str(), "rb");
     if (!vpk_fp) {
         LOG_CRITICAL("Failed to load archive file in path: {}", fs_utils::path_to_utf8(archive_path));
@@ -292,8 +320,15 @@ std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &ar
         return {};
     }
 
+    const mz_uint archive_num_files = mz_zip_reader_get_num_files(zip.get());
     const auto content_path = get_archive_contents_path(zip);
+    LOG_INFO("Archive {}: {} file(s), {} content(s) found", fs_utils::path_to_utf8(archive_path.filename()), archive_num_files, content_path.size());
     if (content_path.empty()) {
+        for (mz_uint i = 0; i < std::min<mz_uint>(archive_num_files, 8); i++) {
+            mz_zip_archive_file_stat file_stat;
+            if (mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+                LOG_ERROR("No installable content found; archive entry {}: '{}'", i, file_stat.m_filename);
+        }
         fclose(vpk_fp);
         return {};
     }
@@ -416,6 +451,19 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
         emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit }));
     };
+    emuenv.kernel.accurate_thread_scheduling = emuenv.cfg.current_config.accurate_thread_scheduling;
+    emuenv.kernel.preempt_on_wake = emuenv.cfg.current_config.preempt_on_wake;
+    emuenv.kernel.preempt_on_wake_us = emuenv.cfg.current_config.preempt_on_wake_us;
+    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={}",
+        emuenv.cfg.current_config.memory_mapping, emuenv.cfg.current_config.accurate_thread_scheduling,
+        emuenv.cfg.current_config.preempt_on_wake,
+        emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores);
+    guest_sched_set_cores(emuenv.cfg.current_config.guest_cores);
+    if (emuenv.kernel.accurate_thread_scheduling)
+        LOG_INFO("Accurate thread scheduling enabled: default-affinity guest threads run one at a time, by priority");
+    if (emuenv.kernel.preempt_on_wake)
+        LOG_INFO("Preempt-on-wake enabled ({}us window): a thread that wakes a higher-priority thread yields the host CPU so the woken thread runs first", emuenv.kernel.preempt_on_wake_us);
+
     if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.cfg.current_config.cpu_opt)) {
         LOG_WARN("Failed to init kernel!");
         return KernelInitFailed;
@@ -463,7 +511,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
 
     // Load param.sfo
     vfs::FileBuffer param_sfo;
-    if (vfs::read_app_file(param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
+    if (vfs::read_app_file(emuenv.io, param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
         sfo::load(emuenv.sfo_handle, param_sfo);
 
     init_exported_vars(emuenv);
@@ -505,7 +553,12 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         if ((process_preload_disabled & code) == 0) {
             if (is_lle_module(name, emuenv)) {
                 const auto module_name_file = fmt::format("{}.suprx", name);
-                if (load_from_app && fs::exists(module_app_path / module_name_file))
+                // The app-supplied module may live in a mounted Game Bundle rather than on the host
+                // FS; probe the bundle first so bundle games still preload their own modules.
+                const auto app_module_ux0_rel = fs::path("app") / emuenv.io.app_path / "sce_module" / module_name_file;
+                const auto bundle_has = bundle::try_exists_ux0(emuenv.io, app_module_ux0_rel);
+                const bool app_module_exists = bundle_has ? *bundle_has : fs::exists(module_app_path / module_name_file);
+                if (load_from_app && app_module_exists)
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
                 else if (fs::exists(emuenv.vita_fs_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));
@@ -614,6 +667,8 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
         return ModuleLoadFailed;
     }
 
+    // Breakpoint instructions only halt a thread when someone can resume it
+    set_breakpoints_halt(emuenv.cfg.gdbstub);
     if (emuenv.cfg.gdbstub) {
         emuenv.kernel.debugger.wait_for_debugger = true;
         server_open(emuenv);

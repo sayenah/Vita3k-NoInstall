@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Vita3K+ NoInstall
+Comment=PlayStation Vita emulator that plays games without installing them
+Exec=Vita3K
+Icon=io.github.sayenah.vita3kplusnoinstall
+Categories=Game;Emulator

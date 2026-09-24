@@ -128,3 +128,26 @@ private:
 
 typedef std::shared_ptr<Callback> CallbackPtr;
 uint32_t process_callbacks(KernelState &kernel, SceUID thread_id);
+
+constexpr int VITA3K_WAIT_INTERRUPTED_BY_CB = 0x1000CB00;
+
+bool thread_in_callback_wait();
+
+struct CallbackWaitScope {
+    explicit CallbackWaitScope(bool enabled);
+    ~CallbackWaitScope();
+
+private:
+    const bool previous;
+};
+
+template <typename F>
+int wait_with_callbacks(KernelState &kernel, SceUID thread_id, F &&wait) {
+    int res;
+    do {
+        process_callbacks(kernel, thread_id);
+        const CallbackWaitScope cb_scope(true);
+        res = wait();
+    } while (res == VITA3K_WAIT_INTERRUPTED_BY_CB);
+    return res;
+}

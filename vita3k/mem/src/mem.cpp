@@ -22,9 +22,16 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <atomic>
+#include <vector>
+
+static thread_local bool g_refused_guest_access = false;
+static std::atomic<bool> g_emulate_refused_jit_access{ false };
+
 #include <cassert>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <utility>
 
 #ifdef _WIN32
@@ -32,18 +39,17 @@
 #include <Windows.h>
 #else
 #include <csignal>
+#include <dlfcn.h>
+#include <setjmp.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <unwind.h>
 #endif
 
 constexpr uint32_t STANDARD_PAGE_SIZE = KiB(4);
 constexpr size_t TOTAL_MEM_SIZE = GiB(4);
 constexpr bool LOG_PROTECT = false;
-#ifdef NDEBUG
-constexpr bool PAGE_NAME_TRACKING = false;
-#else
 constexpr bool PAGE_NAME_TRACKING = true;
-#endif
 
 // TODO: support multiple handlers
 static AccessViolationHandler access_violation_handler;
@@ -123,6 +129,7 @@ bool init(MemState &state, const bool use_page_table) {
 #endif
 
     state.use_page_table = use_page_table;
+    g_emulate_refused_jit_access.store(use_page_table, std::memory_order_relaxed);
     if (use_page_table) {
         state.page_table = PageTable(new PagePtr[TOTAL_MEM_SIZE / KiB(4)]);
         // we use an absolute offset (it is faster), so each entry is the same
@@ -148,10 +155,73 @@ bool is_valid_addr(const MemState &state, Address addr) {
     return addr && state.allocator.free_slot_count(page_num, page_num + 1) == 0;
 }
 
+// re-check under the allocator's writer lock
+bool is_valid_addr_synced(MemState &state, Address addr) {
+    if (is_valid_addr(state, addr))
+        return true;
+    const std::lock_guard<std::mutex> lock(state.generation_mutex);
+    return is_valid_addr(state, addr);
+}
+
 bool is_valid_addr_range(const MemState &state, Address start, Address end) {
     const uint32_t start_page = start / STANDARD_PAGE_SIZE;
     const uint32_t end_page = (end + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
     return state.allocator.free_slot_count(start_page, end_page) == 0;
+}
+
+static inline uint8_t *debug_host_ptr(const MemState &state, Address addr) {
+    return state.use_page_table ? (state.page_table[addr / 4096u] + addr) : (&state.memory[addr]);
+}
+
+static void debug_copy_by_page(const MemState &state, Address addr, uint8_t *dst, const uint8_t *src, uint32_t size, bool to_guest) {
+    uint32_t done = 0;
+    while (done < size) {
+        const Address cur = addr + done;
+        const uint32_t in_page = 4096u - (cur & 4095u);
+        const uint32_t chunk = std::min(in_page, size - done);
+        uint8_t *host = debug_host_ptr(state, cur);
+        if (to_guest)
+            memcpy(host, src + done, chunk);
+        else
+            memcpy(dst + done, host, chunk);
+        done += chunk;
+    }
+}
+
+bool debug_safe_copy_guest(const MemState &state, Address addr, void *dst, uint32_t size) {
+    if (!addr || addr + size < addr)
+        return false;
+    if (!is_valid_addr_range(state, addr, addr + size))
+        return false;
+#ifdef _MSC_VER // SEH; MinGW/clang Windows builds take the unguarded path
+    __try {
+        debug_copy_by_page(state, addr, static_cast<uint8_t *>(dst), nullptr, size, false);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    debug_copy_by_page(state, addr, static_cast<uint8_t *>(dst), nullptr, size, false);
+    return true;
+#endif
+}
+
+bool debug_safe_write_guest(MemState &state, Address addr, const void *src, uint32_t size) {
+    if (!addr || addr + size < addr)
+        return false;
+    if (!is_valid_addr_range(state, addr, addr + size))
+        return false;
+#ifdef _MSC_VER
+    __try {
+        debug_copy_by_page(state, addr, nullptr, static_cast<const uint8_t *>(src), size, true);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    debug_copy_by_page(state, addr, nullptr, static_cast<const uint8_t *>(src), size, true);
+    return true;
+#endif
 }
 
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force) {
@@ -227,35 +297,10 @@ static void align_to_page(MemState &state, Address &addr, Address &size) {
     size = end - addr;
 }
 
-void unprotect_inner(MemState &state, Address addr, uint32_t size) {
-    if (LOG_PROTECT) {
-        fmt::print("Unprotect: {} {}\n", log_hex(addr), size);
-    }
-    uint8_t *addr_ptr = state.use_page_table ? state.page_table[addr / KiB(4)] : state.memory.get();
-
-    uint8_t *target = &addr_ptr[addr];
+static void apply_host_protect(uint8_t *target, size_t size, const MemPerm perm, size_t host_page_size) {
     uint8_t *aligned_start = reinterpret_cast<uint8_t *>(
-        align_down(reinterpret_cast<uintptr_t>(target), state.host_page_size));
-    uint8_t *aligned_end = reinterpret_cast<uint8_t *>(align(reinterpret_cast<uintptr_t>(target + size), state.host_page_size));
-    size_t aligned_size = aligned_end - aligned_start;
-
-#ifdef _WIN32
-    DWORD old_protect = 0;
-    const BOOL ret = VirtualProtect(aligned_start, aligned_size, PAGE_READWRITE, &old_protect);
-    LOG_CRITICAL_IF(!ret, "VirtualAlloc failed: {}", get_error_msg());
-#else
-    const int ret = mprotect(aligned_start, aligned_size, PROT_READ | PROT_WRITE);
-    LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
-#endif
-}
-
-void protect_inner(MemState &state, Address addr, uint32_t size, const MemPerm perm) {
-    uint8_t *addr_ptr = state.use_page_table ? state.page_table[addr / KiB(4)] : state.memory.get();
-
-    uint8_t *target = &addr_ptr[addr];
-    uint8_t *aligned_start = reinterpret_cast<uint8_t *>(
-        align_down(reinterpret_cast<uintptr_t>(target), state.host_page_size));
-    uint8_t *aligned_end = reinterpret_cast<uint8_t *>(align(reinterpret_cast<uintptr_t>(target + size), state.host_page_size));
+        align_down(reinterpret_cast<uintptr_t>(target), host_page_size));
+    uint8_t *aligned_end = reinterpret_cast<uint8_t *>(align(reinterpret_cast<uintptr_t>(target + size), host_page_size));
     size_t aligned_size = aligned_end - aligned_start;
 
 #ifdef _WIN32
@@ -268,9 +313,175 @@ void protect_inner(MemState &state, Address addr, uint32_t size, const MemPerm p
 #endif
 }
 
+static void release_external_shadow_pages(uint8_t *target, size_t size, size_t host_page_size) {
+    constexpr bool release_shadow_pages_when_mapped = true;
+    if (!release_shadow_pages_when_mapped)
+        return;
+#ifndef _WIN32
+    // Windows deliberately excluded here
+    uint8_t *inner_start = reinterpret_cast<uint8_t *>(align(reinterpret_cast<uintptr_t>(target), host_page_size));
+    uint8_t *inner_end = reinterpret_cast<uint8_t *>(align_down(reinterpret_cast<uintptr_t>(target + size), host_page_size));
+    if (inner_end <= inner_start)
+        return;
+
+    const size_t inner_size = static_cast<size_t>(inner_end - inner_start);
+    if (madvise(inner_start, inner_size, MADV_DONTNEED) == -1) {
+        LOG_WARN_ONCE("madvise(MADV_DONTNEED) failed releasing externally mapped pages: {}", get_error_msg());
+        return;
+    }
+
+    static std::atomic<uint64_t> released_total{ 0 };
+    const uint64_t before = released_total.fetch_add(inner_size, std::memory_order_relaxed);
+    const uint64_t after = before + inner_size;
+    constexpr uint64_t step = MiB(64);
+    if ((before / step) != (after / step))
+        LOG_INFO("Released {} MiB of arena pages shadowed by external mappings", after / MiB(1));
+#else
+    (void)target;
+    (void)size;
+    (void)host_page_size;
+#endif
+}
+
+static void apply_host_protect_paged(MemState &state, Address addr, uint32_t size, const MemPerm perm) {
+    if (size == 0)
+        return;
+    if (!state.use_page_table) {
+        apply_host_protect(&state.memory[addr], size, perm, state.host_page_size);
+        return;
+    }
+    const uint64_t end = static_cast<uint64_t>(addr) + size;
+    uint64_t run_start = addr;
+    uint8_t *run_entry = state.page_table[addr / KiB(4)];
+    for (uint64_t page = (static_cast<uint64_t>(addr) & ~static_cast<uint64_t>(0xFFF)) + KiB(4);; page += KiB(4)) {
+        const bool last = page >= end;
+        uint8_t *entry = last ? nullptr : state.page_table[page / KiB(4)];
+        if (last || entry != run_entry) {
+            const uint64_t run_end = last ? end : page;
+            apply_host_protect(run_entry + run_start, static_cast<size_t>(run_end - run_start), perm, state.host_page_size);
+            if (last)
+                break;
+            run_start = page;
+            run_entry = entry;
+        }
+    }
+}
+
+void unprotect_inner(MemState &state, Address addr, uint32_t size) {
+    if (LOG_PROTECT) {
+        fmt::print("Unprotect: {} {}\n", log_hex(addr), size);
+    }
+    apply_host_protect_paged(state, addr, size, MemPerm::ReadWrite);
+}
+
+void protect_inner(MemState &state, Address addr, uint32_t size, const MemPerm perm) {
+    apply_host_protect_paged(state, addr, size, perm);
+}
+
+std::string (*g_fault_context_provider)() = nullptr;
+
+void set_fault_context_provider(std::string (*provider)()) {
+    g_fault_context_provider = provider;
+}
+
+static inline uint8_t *guest_host_ptr(const MemState &mem, Address addr) {
+    return mem.use_page_table ? mem.page_table[addr / KiB(4)] + addr : mem.memory.get() + addr;
+}
+
+static inline bool guest_range_contiguous(const MemState &mem, Address addr, uint32_t size) {
+    if (!mem.use_page_table || size <= 1)
+        return true;
+    const uint8_t *const base = mem.page_table[addr / KiB(4)];
+    for (Address page = (addr | 0xFFFu) + 1; page < addr + size; page += KiB(4)) {
+        if (mem.page_table[page / KiB(4)] != base)
+            return false;
+    }
+    return true;
+}
+
+void memcpy_to_guest(MemState &mem, Address dst, const void *src, uint32_t size) {
+    if (!dst || size == 0)
+        return;
+    if (guest_range_contiguous(mem, dst, size)) {
+        memcpy(guest_host_ptr(mem, dst), src, size);
+        return;
+    }
+    const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+    const uint8_t *s = static_cast<const uint8_t *>(src);
+    uint32_t off = 0;
+    while (off < size) {
+        const Address cur = dst + off;
+        const uint32_t chunk = std::min<uint32_t>(size - off, static_cast<uint32_t>(KiB(4) - (cur & 0xFFFu)));
+        memcpy(guest_host_ptr(mem, cur), s + off, chunk);
+        off += chunk;
+    }
+}
+
+void memcpy_from_guest(MemState &mem, void *dst, Address src, uint32_t size) {
+    if (!src || size == 0)
+        return;
+    if (guest_range_contiguous(mem, src, size)) {
+        memcpy(dst, guest_host_ptr(mem, src), size);
+        return;
+    }
+    const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+    uint8_t *d = static_cast<uint8_t *>(dst);
+    uint32_t off = 0;
+    while (off < size) {
+        const Address cur = src + off;
+        const uint32_t chunk = std::min<uint32_t>(size - off, static_cast<uint32_t>(KiB(4) - (cur & 0xFFFu)));
+        memcpy(d + off, guest_host_ptr(mem, cur), chunk);
+        off += chunk;
+    }
+}
+
+void memmove_guest(MemState &mem, Address dst, Address src, uint32_t size) {
+    if (!dst || !src || size == 0)
+        return;
+    if (guest_range_contiguous(mem, dst, size) && guest_range_contiguous(mem, src, size)) {
+        memmove(guest_host_ptr(mem, dst), guest_host_ptr(mem, src), size);
+        return;
+    }
+    std::vector<uint8_t> temp(size);
+    memcpy_from_guest(mem, temp.data(), src, size);
+    memcpy_to_guest(mem, dst, temp.data(), size);
+}
+
+void memset_guest(MemState &mem, Address dst, int ch, uint32_t size) {
+    if (!dst || size == 0)
+        return;
+    if (guest_range_contiguous(mem, dst, size)) {
+        memset(guest_host_ptr(mem, dst), ch, size);
+        return;
+    }
+    const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+    uint32_t off = 0;
+    while (off < size) {
+        const Address cur = dst + off;
+        const uint32_t chunk = std::min<uint32_t>(size - off, static_cast<uint32_t>(KiB(4) - (cur & 0xFFFu)));
+        memset(guest_host_ptr(mem, cur), ch, chunk);
+        off += chunk;
+    }
+}
+
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept {
+    g_refused_guest_access = false;
     const uintptr_t memory_addr = reinterpret_cast<uintptr_t>(state.memory.get());
     const uintptr_t fault_addr = reinterpret_cast<uintptr_t>(addr);
+
+    static thread_local bool handling_fault = false;
+    if (handling_fault)
+        return false;
+    struct FaultGuard {
+        bool &flag;
+        explicit FaultGuard(bool &f)
+            : flag(f) {
+            flag = true;
+        }
+        ~FaultGuard() {
+            flag = false;
+        }
+    } fault_guard(handling_fault);
 
     Address vaddr = 0;
     const std::unique_lock<std::mutex> lock(state.protect_mutex);
@@ -292,25 +503,61 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     }
 
     if (!is_valid_addr(state, vaddr)) {
+        static std::atomic<uint32_t> invalid_count{ 0 };
+        if (invalid_count.fetch_add(1, std::memory_order_relaxed) < 8)
+            LOG_CRITICAL("Refused {} to INVALID guest address 0x{:X} (host 0x{:X}){}", write ? "write" : "read", vaddr, fault_addr,
+                g_fault_context_provider ? g_fault_context_provider() : std::string());
+        g_refused_guest_access = true;
         return false;
     }
     if (LOG_PROTECT) {
         fmt::print("Access: {}\n", log_hex(vaddr));
     }
 
+    // never allow accesses to the null guard page - letting them through silently corrupts low memory
+    if (vaddr < 0x1000) {
+        static std::atomic<uint32_t> null_count{ 0 };
+        if (null_count.fetch_add(1, std::memory_order_relaxed) < 8)
+            LOG_CRITICAL("Refused {} to the NULL guard page (guest 0x{:X}){}", write ? "write" : "read", vaddr,
+                g_fault_context_provider ? g_fault_context_provider() : std::string());
+        g_refused_guest_access = true;
+        return false;
+    }
+
+    // HACK: keep going recovery for faults with no covering protect_tree entry
+    const auto unhandled_but_valid = [&]() {
+        apply_host_protect(reinterpret_cast<uint8_t *>(align_down(fault_addr, state.host_page_size)),
+            state.host_page_size, MemPerm::ReadWrite, state.host_page_size);
+        const bool arena_fault = fault_addr >= memory_addr && fault_addr < memory_addr + TOTAL_MEM_SIZE;
+        const bool stale_host_pointer = arena_fault && state.use_page_table && state.page_table[vaddr / KiB(4)] != state.memory.get();
+        if (stale_host_pointer) {
+            static std::atomic<uint32_t> stale_count{ 0 };
+            const uint32_t n = stale_count.fetch_add(1, std::memory_order_relaxed);
+            if (n < 8 || (n & 63) == 0)
+                LOG_CRITICAL("STALE HOST POINTER: host-side {} into the ARENA of guest 0x{:X} whose live backing is a mapped buffer -- the data will diverge from what the guest reads (#{}){}",
+                    write ? "write" : "read", vaddr, n + 1,
+                    g_fault_context_provider ? g_fault_context_provider() : std::string());
+            return;
+        }
+        static std::atomic<uint32_t> count{ 0 };
+        const uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
+        if (n < 8) {
+            LOG_CRITICAL("Unhandled {} to protected-but-valid region. vaddr=0x{:X} host=0x{:X}{}",
+                write ? "write" : "read", vaddr, fault_addr,
+                g_fault_context_provider ? g_fault_context_provider() : std::string());
+        } else if (n == 8)
+            LOG_CRITICAL("Further unhandled protected-region accesses will be suppressed");
+    };
+
     auto it = state.protect_tree.lower_bound(vaddr);
     if (it == state.protect_tree.end()) {
-        // HACK: keep going
-        unprotect_inner(state, align_down(vaddr, state.host_page_size), state.host_page_size);
-        LOG_CRITICAL("Unhandled write protected region was valid. Address=0x{:X}", vaddr);
+        unhandled_but_valid();
         return true;
     }
 
     ProtectSegmentInfo &info = it->second;
     if (vaddr < it->first || vaddr >= it->first + info.size) {
-        // HACK: keep going
-        unprotect_inner(state, align_down(vaddr, state.host_page_size), state.host_page_size);
-        LOG_CRITICAL("Unhandled write protected region was valid. Address=0x{:X}", vaddr);
+        unhandled_but_valid();
         return true;
     }
 
@@ -323,6 +570,29 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     state.protect_tree.erase(it);
 
     return true;
+}
+
+Address host_to_guest(const MemState &state, const void *host) {
+    if (host == nullptr)
+        return 0;
+
+    const uint64_t host_val = std::bit_cast<uint64_t>(host);
+    const uint64_t memory_base = std::bit_cast<uint64_t>(state.memory.get());
+
+    // Fast path: the pointer is inside the linear guest-RAM window. Covers most conversions and takes no lock
+    if (host_val >= memory_base && host_val < memory_base + TOTAL_MEM_SIZE)
+        return static_cast<Address>(host_val - memory_base);
+
+    // Otherwise the pointer lives inside an external GPU mapping whose pages were pointed away
+    if (state.use_page_table) {
+        const std::lock_guard<std::mutex> ext_lock(state.external_mapping_mutex);
+        auto it = state.external_mapping.lower_bound(host_val);
+        if (it != state.external_mapping.end() && host_val < it->first + it->second.size)
+            return it->second.address + static_cast<Address>(host_val - it->first);
+    }
+
+    // Fallback: linear (likely a bogus pointer?)
+    return static_cast<Address>(host_val - memory_base);
 }
 
 bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback) {
@@ -380,6 +650,28 @@ bool is_protecting(MemState &state, Address addr, MemPerm *perm) {
     return false;
 }
 
+// Verify that dst is a faithful copy of src after the bulk memcpy of a page-table transition
+static bool verify_page(MemState &mem, uint8_t *dst, const uint8_t *src, const char *what, Address page_addr) {
+    bool recopied = false;
+    for (int pass = 0; pass < 4 && memcmp(dst, src, KiB(4)) != 0; pass++) {
+        memcpy(dst, src, KiB(4));
+        recopied = true;
+        LOG_WARN("{} page 0x{:X}: verify pass {} re-copied it after a concurrent writer changed it (world not_parked={})", what, page_addr, pass, mem.transition_not_parked);
+    }
+    return recopied;
+}
+
+static void note_transition(MemState &mem, bool recopied_any) {
+    mem.transition_count++;
+    if (recopied_any) {
+        mem.transition_recopy_events++;
+        if (mem.transition_not_parked == 0)
+            mem.transition_recopy_events_fully_parked++;
+    }
+    if ((mem.transition_count & 255) == 0)
+        LOG_INFO("[VERIFY] {} page-table transitions, {} had a concurrent-writer re-copy, {} of those with the world fully parked", mem.transition_count, mem.transition_recopy_events, mem.transition_recopy_events_fully_parked);
+}
+
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr) {
     assert((size & 4095) == 0);
     if (!mem.use_page_table)
@@ -388,31 +680,58 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
     uint64_t addr_value = std::bit_cast<uint64_t>(addr_ptr);
     uint8_t *page_table_entry = addr_ptr - addr;
     uint8_t *original_address = &mem.memory[addr];
-    for (int block = 0; block < size / KiB(4); block++) {
-        // this is not thread write safe, but hopefully not other thread is busy copying while this happens
-        memcpy(addr_ptr + block * KiB(4), original_address + block * KiB(4), KiB(4));
-        mem.page_table[addr / KiB(4) + block] = page_table_entry;
-    }
 
-    // set the first page table entry to the original value to be able to call protect_inner
-    mem.page_table[addr / KiB(4)] = mem.memory.get();
-    protect_inner(mem, addr, size, MemPerm::None);
-    mem.page_table[addr / KiB(4)] = page_table_entry;
+    const std::unique_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+
+    // Copy every page from its live backing
+    bool recopied_any = false;
+    for (uint32_t off = 0; off < size; off += KiB(4)) {
+        const Address page_addr = addr + off;
+        const uint8_t *src = mem.page_table[page_addr / KiB(4)] + page_addr;
+        memcpy(addr_ptr + off, src, KiB(4));
+        recopied_any |= verify_page(mem, addr_ptr + off, src, "add_external_mapping", page_addr);
+    }
+    note_transition(mem, recopied_any);
+
+    std::atomic_thread_fence(std::memory_order_release);
+    for (uint32_t block = 0; block < size / KiB(4); block++)
+        mem.page_table[addr / KiB(4) + block] = page_table_entry;
+
+    apply_host_protect(original_address, size, MemPerm::None, mem.host_page_size);
+    release_external_shadow_pages(original_address, size, mem.host_page_size);
 
     const std::unique_lock<std::mutex> lock(mem.protect_mutex);
+    const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);
     mem.external_mapping[addr_value] = { addr, size };
 }
 
 void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
     uint64_t addr_value = std::bit_cast<uint64_t>(addr_ptr);
     MemExternalMapping mapping;
+    struct Survivor {
+        uint8_t *base;
+        Address address;
+        uint32_t size;
+    };
+    std::vector<Survivor> survivors;
     if (mem.use_page_table) {
         const std::unique_lock<std::mutex> lock(mem.protect_mutex);
+        const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);
         auto it = mem.external_mapping.find(addr_value);
         assert(it != mem.external_mapping.end());
+        if (it == mem.external_mapping.end()) {
+            LOG_ERROR("[EXTMAP] remove MISS key=0x{:X} size=0x{:X}: entry already gone (was crashing via end() deref); {} live entries:", addr_value, size, mem.external_mapping.size());
+            for (const auto &[host, other] : mem.external_mapping)
+                LOG_ERROR("[EXTMAP]   host 0x{:X} -> guest 0x{:X} size 0x{:X}", host, other.address, other.size);
+            return;
+        }
 
         mapping = it->second;
         mem.external_mapping.erase(it);
+        for (const auto &[host, other] : mem.external_mapping) {
+            if (other.address < mapping.address + mapping.size && mapping.address < other.address + other.size)
+                survivors.push_back({ std::bit_cast<uint8_t *>(host), other.address, other.size });
+        }
     } else {
         mapping.address = static_cast<Address>(addr_ptr - mem.memory.get());
         mapping.size = size;
@@ -441,15 +760,59 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
     }
 
     if (mem.use_page_table) {
-        // unprotect the original memory range
-        mem.page_table[mapping.address / KiB(4)] = mem.memory.get();
-        unprotect_inner(mem, mapping.address, mapping.size);
-        // copy back and reset the page table
-        for (int block = 0; block < mapping.size / KiB(4); block++) {
-            // this is not thread write safe, but hopefully not other thread is busy copying while this happens
-            memcpy(&mem.memory[mapping.address] + block * KiB(4), addr_ptr + block * KiB(4), KiB(4));
-            mem.page_table[mapping.address / KiB(4) + block] = mem.memory.get();
+        const std::unique_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+
+        uint8_t *const own_entry = addr_ptr - mapping.address;
+        bool recopied_any = false;
+
+        uint32_t run_begin = 0, run_end = 0; // byte offsets of the pending arena run
+        const auto flush_run = [&]() {
+            if (run_end == run_begin)
+                return;
+            uint8_t *arena = &mem.memory[mapping.address + run_begin];
+            apply_host_protect(arena, run_end - run_begin, MemPerm::ReadWrite, mem.host_page_size);
+            for (uint32_t off = run_begin; off < run_end; off += KiB(4)) {
+                memcpy(arena + (off - run_begin), addr_ptr + off, KiB(4));
+                recopied_any |= verify_page(mem, arena + (off - run_begin), addr_ptr + off, "remove_external_mapping", mapping.address + off);
+            }
+            std::atomic_thread_fence(std::memory_order_release);
+            for (uint32_t off = run_begin; off < run_end; off += KiB(4))
+                mem.page_table[(mapping.address + off) / KiB(4)] = mem.memory.get();
+            run_begin = run_end;
+        };
+
+        for (uint32_t off = 0; off < mapping.size; off += KiB(4)) {
+            const Address page_addr = mapping.address + off;
+            const size_t index = page_addr / KiB(4);
+            if (mem.page_table[index] != own_entry) {
+                // lives in the arena already (an old hole) or in a newer mapping: nothing of ours to copy back
+                flush_run();
+                run_begin = run_end = off + KiB(4);
+                continue;
+            }
+            const Survivor *heir = nullptr;
+            for (const Survivor &candidate : survivors) {
+                if (candidate.address <= page_addr && page_addr < candidate.address + candidate.size) {
+                    heir = &candidate;
+                    break;
+                }
+            }
+            if (!heir) {
+                if (run_end != off)
+                    run_begin = run_end = off;
+                run_end = off + KiB(4);
+                continue;
+            }
+            flush_run();
+            run_begin = run_end = off + KiB(4);
+            uint8_t *dst = heir->base + (page_addr - heir->address);
+            memcpy(dst, addr_ptr + off, KiB(4));
+            recopied_any |= verify_page(mem, dst, addr_ptr + off, "remove_external_mapping(hand-over)", page_addr);
+            std::atomic_thread_fence(std::memory_order_release);
+            mem.page_table[index] = heir->base - heir->address;
         }
+        flush_run();
+        note_transition(mem, recopied_any);
     }
 }
 
@@ -487,9 +850,16 @@ void free(MemState &state, Address address) {
     const uint32_t page_num = address / STANDARD_PAGE_SIZE;
     assert(page_num >= 0);
 
+    if (state.alloc_table == nullptr) {
+        LOG_CRITICAL("Freeing unallocated alloc_table");
+        return;
+    }
+
     AllocMemPage &page = state.alloc_table[page_num];
     if (!page.allocated) {
-        LOG_CRITICAL("Freeing unallocated page");
+        // continuing would free page.size stale pages in the bitmap, wiping ranges that may since have been re-allocated
+        LOG_CRITICAL("Freeing unallocated page at addr 0x{:X} (stale size {} pages) — ignored", address, static_cast<uint32_t>(page.size));
+        return;
     }
     page.allocated = 0;
 
@@ -502,20 +872,37 @@ void free(MemState &state, Address address) {
     const Address region_start = page_num * STANDARD_PAGE_SIZE;
     const Address region_end = region_start + page.size * STANDARD_PAGE_SIZE;
 
-    Address host_page = align_down(region_start, state.host_page_size);
-    Address batch_start = 0;
-    uint32_t batch_size = 0;
+    if (!state.preserve_freed_pages) {
+        Address host_page = align_down(region_start, state.host_page_size);
+        Address batch_start = 0;
+        uint32_t batch_size = 0;
 
-    while (host_page < region_end) {
-        Address host_page_end = host_page + state.host_page_size;
-        uint32_t first_guest = host_page / STANDARD_PAGE_SIZE;
-        uint32_t last_guest = host_page_end / STANDARD_PAGE_SIZE;
+        while (host_page < region_end) {
+            Address host_page_end = host_page + state.host_page_size;
+            uint32_t first_guest = host_page / STANDARD_PAGE_SIZE;
+            uint32_t last_guest = host_page_end / STANDARD_PAGE_SIZE;
 
-        if (state.allocator.free_slot_count(first_guest, last_guest) == (last_guest - first_guest)) {
-            if (batch_size == 0)
-                batch_start = host_page;
-            batch_size += state.host_page_size;
-        } else if (batch_size > 0) {
+            if (state.allocator.free_slot_count(first_guest, last_guest) == (last_guest - first_guest)) {
+                if (batch_size == 0)
+                    batch_start = host_page;
+                batch_size += state.host_page_size;
+            } else if (batch_size > 0) {
+                uint8_t *memory = &state.memory[batch_start];
+#ifdef _WIN32
+                const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
+                LOG_CRITICAL_IF(!ret, "VirtualFree failed: {}", get_error_msg());
+#else
+                int ret = mprotect(memory, batch_size, PROT_NONE);
+                LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
+                ret = madvise(memory, batch_size, MADV_DONTNEED);
+                LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
+#endif
+                batch_size = 0;
+            }
+            host_page = host_page_end;
+        }
+
+        if (batch_size > 0) {
             uint8_t *memory = &state.memory[batch_start];
 #ifdef _WIN32
             const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
@@ -526,22 +913,7 @@ void free(MemState &state, Address address) {
             ret = madvise(memory, batch_size, MADV_DONTNEED);
             LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
 #endif
-            batch_size = 0;
         }
-        host_page = host_page_end;
-    }
-
-    if (batch_size > 0) {
-        uint8_t *memory = &state.memory[batch_start];
-#ifdef _WIN32
-        const BOOL ret = VirtualFree(memory, batch_size, MEM_DECOMMIT);
-        LOG_CRITICAL_IF(!ret, "VirtualFree failed: {}", get_error_msg());
-#else
-        int ret = mprotect(memory, batch_size, PROT_NONE);
-        LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
-        ret = madvise(memory, batch_size, MADV_DONTNEED);
-        LOG_CRITICAL_IF(ret == -1, "madvise failed: {}", get_error_msg());
-#endif
     }
 }
 
@@ -551,9 +923,20 @@ uint32_t mem_available(MemState &state) {
 
 const char *mem_name(Address address, MemState &state) {
     if (PAGE_NAME_TRACKING) {
-        return state.page_name_map.find(address / STANDARD_PAGE_SIZE)->second.c_str();
+        const int page = static_cast<int>(address / STANDARD_PAGE_SIZE);
+        auto it = state.page_name_map.upper_bound(page);
+        if (it == state.page_name_map.begin())
+            return "";
+        --it;
+        const AllocMemPage &owner = state.alloc_table[it->first];
+        if (owner.allocated && page < it->first + static_cast<int>(owner.size))
+            return it->second.c_str();
     }
     return "";
+}
+
+std::string fault_context() {
+    return g_fault_context_provider ? g_fault_context_provider() : std::string();
 }
 
 void deinit_mem(MemState &state) {
@@ -576,6 +959,97 @@ void deinit_mem(MemState &state) {
 
 #ifdef _WIN32
 
+// Decoding the faulting host instruction needs Zydis and the x64 CONTEXT, so ARM64 Windows
+// keeps the plain fault handling.
+#if defined(_M_X64) || defined(__x86_64__)
+#define VITA3K_EMULATE_REFUSED_JIT_ACCESS
+#include <Zydis/Zydis.h>
+
+static bool rip_in_host_module(const uint64_t rip) noexcept {
+    HMODULE module = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(rip), &module) != 0;
+}
+
+static void zero_context_register(CONTEXT *ctx, const ZydisRegister reg) noexcept {
+    const ZydisRegisterClass cls = ZydisRegisterGetClass(reg);
+    switch (cls) {
+    case ZYDIS_REGCLASS_GPR8:
+    case ZYDIS_REGCLASS_GPR16:
+    case ZYDIS_REGCLASS_GPR32:
+    case ZYDIS_REGCLASS_GPR64: {
+        const ZydisRegister full = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg);
+        const int id = ZydisRegisterGetId(full);
+        if (id < 0 || id > 15)
+            return;
+        DWORD64 *gpr = &reinterpret_cast<DWORD64 *>(&ctx->Rax)[id]; // Rax..R15 are contiguous in CONTEXT
+        if (cls == ZYDIS_REGCLASS_GPR64 || cls == ZYDIS_REGCLASS_GPR32)
+            *gpr = 0; // a 32-bit write zero-extends
+        else if (cls == ZYDIS_REGCLASS_GPR16)
+            *gpr &= ~0xFFFFull;
+        else if (reg == ZYDIS_REGISTER_AH || reg == ZYDIS_REGISTER_CH || reg == ZYDIS_REGISTER_DH || reg == ZYDIS_REGISTER_BH)
+            *gpr &= ~0xFF00ull;
+        else
+            *gpr &= ~0xFFull;
+        break;
+    }
+    case ZYDIS_REGCLASS_XMM: {
+        const int id = ZydisRegisterGetId(reg);
+        if (id < 0 || id > 15)
+            return;
+        M128A *xmm = &(&ctx->Xmm0)[id];
+        xmm->Low = 0;
+        xmm->High = 0;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// page-table mode has no fastmem patch to fall back on, so a refused JIT access is emulated like dynarmic's slow path
+static bool emulate_refused_jit_access(PEXCEPTION_POINTERS pExp, const uint8_t *fault_ptr, const bool is_writing) noexcept {
+    CONTEXT *ctx = pExp->ContextRecord;
+    const uint64_t rip = ctx->Rip;
+    if (rip_in_host_module(rip))
+        return false; // a host-side bug, not JIT code: keep it fatal and visible
+
+    ZydisDecoder decoder;
+    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
+        return false;
+    ZydisDecodedInstruction instr;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<const void *>(rip), 16, &instr, operands)))
+        return false;
+
+    bool mem_read = false, mem_write = false;
+    for (unsigned i = 0; i < instr.operand_count; i++) {
+        if (operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            mem_read |= (operands[i].actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0;
+            mem_write |= (operands[i].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
+        }
+    }
+    unsigned zeroed = 0;
+    if (mem_read && !mem_write) {
+        for (unsigned i = 0; i < instr.operand_count; i++) {
+            const ZydisDecodedOperand &op = operands[i];
+            if (op.type == ZYDIS_OPERAND_TYPE_REGISTER && (op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) && op.reg.value != ZYDIS_REGISTER_RFLAGS) {
+                zero_context_register(ctx, op.reg.value);
+                zeroed++;
+            }
+        }
+    }
+    ctx->Rip = rip + instr.length;
+
+    static std::atomic<uint32_t> emulated{ 0 };
+    const uint32_t n = emulated.fetch_add(1, std::memory_order_relaxed);
+    if (n < 16 || (n & 255) == 0)
+        LOG_CRITICAL("[JITFAULT] resumed JIT code after a refused guest {} (#{}): host rip 0x{:X} '{}' ({} bytes, memory {}{}), fault host 0x{:X}, {} register(s) zeroed{}",
+            is_writing ? "write" : "read", n + 1, rip, ZydisMnemonicGetString(instr.mnemonic), instr.length, mem_read ? "R" : "", mem_write ? "W" : "",
+            reinterpret_cast<uintptr_t>(fault_ptr), zeroed, g_fault_context_provider ? g_fault_context_provider() : std::string());
+    return true;
+}
+#endif
+
 static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT && IsDebuggerPresent()) {
         return EXCEPTION_CONTINUE_SEARCH;
@@ -585,9 +1059,15 @@ static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     const bool is_executing = pExp->ExceptionRecord->ExceptionInformation[0] == 8;
 
     if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && !is_executing) {
+        g_refused_guest_access = false;
         if (access_violation_handler(ptr, is_writing)) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+#ifdef VITA3K_EMULATE_REFUSED_JIT_ACCESS
+        if (g_refused_guest_access && g_emulate_refused_jit_access.load(std::memory_order_relaxed) && emulate_refused_jit_access(pExp, ptr, is_writing)) {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+#endif
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
@@ -602,49 +1082,175 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
 
 #else
 
+static thread_local sigjmp_buf t_fault_probe_jmp;
+static thread_local volatile bool t_fault_probe_active = false;
+
+static uintptr_t extract_fault_pc(ucontext_t *context) {
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    return static_cast<uintptr_t>(context->uc_mcontext->__ss.__pc);
+#else
+    return static_cast<uintptr_t>(context->uc_mcontext.pc);
+#endif
+#elif defined(__x86_64__)
+#if defined(__APPLE__)
+    return static_cast<uintptr_t>(context->uc_mcontext->__ss.__rip);
+#else
+    return static_cast<uintptr_t>(context->uc_mcontext.gregs[REG_RIP]);
+#endif
+#else
+    (void)context;
+    return 0;
+#endif
+}
+
+static uintptr_t extract_fault_lr(ucontext_t *context) {
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    return static_cast<uintptr_t>(context->uc_mcontext->__ss.__lr);
+#else
+    return static_cast<uintptr_t>(context->uc_mcontext.regs[30]);
+#endif
+#else
+    (void)context;
+    return 0;
+#endif
+}
+
 static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
     auto context = static_cast<ucontext_t *>(uct);
 
+    if (t_fault_probe_active)
+        siglongjmp(t_fault_probe_jmp, sig);
+
+    static thread_local int handler_depth = 0;
+    if (handler_depth >= 1) {
+        signal(sig, SIG_DFL);
+        return;
+    }
+    handler_depth++;
+    struct DepthGuard {
+        int &depth;
+        ~DepthGuard() { --depth; }
+    } depth_guard{ handler_depth };
+
+#ifdef __ANDROID__
+    if (sig == SIGBUS) {
+        const uintptr_t pc = extract_fault_pc(context);
+        const uintptr_t lr = extract_fault_lr(context);
+        const char *pc_module = "?";
+        uintptr_t pc_offset = 0;
+        Dl_info dl_pc{};
+        if (pc != 0 && dladdr(reinterpret_cast<void *>(pc), &dl_pc) != 0 && dl_pc.dli_fname != nullptr) {
+            pc_module = dl_pc.dli_fname;
+            pc_offset = pc - reinterpret_cast<uintptr_t>(dl_pc.dli_fbase);
+        }
+        LOG_CRITICAL("[SIGBUS] si_code {} at address 0x{:X} - pc 0x{:X} = {}+0x{:X} lr 0x{:X} - reported BEFORE recovery; if the log ends here, recovery re-faulted",
+            info->si_code, reinterpret_cast<uintptr_t>(info->si_addr), pc, pc_module, pc_offset, lr);
+        logging::flush();
+    }
+#endif
+
+    if (sig != SIGABRT && sig != SIGILL) {
 #ifdef __aarch64__
 #ifdef __APPLE__
-    const uint32_t esr = context->uc_mcontext->__es.__esr;
+        const uint32_t esr = context->uc_mcontext->__es.__esr;
 #else
-    _aarch64_ctx *ctx = reinterpret_cast<_aarch64_ctx *>(context->uc_mcontext.__reserved);
-    // get the ESR register
-    while (ctx->magic != ESR_MAGIC) {
-        if (ctx->magic == 0)
-            [[unlikely]]
-            raise(SIGTRAP);
-        else
-            [[likely]]
+        uint64_t esr = 0;
+        bool have_esr = false;
+        _aarch64_ctx *ctx = reinterpret_cast<_aarch64_ctx *>(context->uc_mcontext.__reserved);
+        while (ctx->magic != 0) {
+            if (ctx->magic == ESR_MAGIC) {
+                esr = reinterpret_cast<esr_context *>(ctx)->esr;
+                have_esr = true;
+                break;
+            }
             ctx = reinterpret_cast<_aarch64_ctx *>(reinterpret_cast<uint8_t *>(ctx) + ctx->size);
-    }
-
-    const uint64_t esr = reinterpret_cast<esr_context *>(ctx)->esr;
+        }
 #endif
-    // https://developer.arm.com/documentation/ddi0595/2021-03/AArch64-Registers/ESR-EL1--Exception-Syndrome-Register--EL1-
-    const uint32_t exception_class = static_cast<uint32_t>(esr) >> 26;
-    const bool is_executing = (exception_class == 0b100000) || (exception_class == 0b100001);
-    const bool is_data_abort = (exception_class == 0b100100) || (exception_class == 0b100101);
-    const bool is_writing = is_data_abort && (esr & (1 << 6));
+        // https://developer.arm.com/documentation/ddi0595/2021-03/AArch64-Registers/ESR-EL1--Exception-Syndrome-Register--EL1-
+#ifdef __APPLE__
+        constexpr bool have_esr = true;
+#endif
+        const uint32_t exception_class = have_esr ? (static_cast<uint32_t>(esr) >> 26) : 0;
+        const bool is_executing = have_esr && ((exception_class == 0b100000) || (exception_class == 0b100001));
+        const bool is_data_abort = (exception_class == 0b100100) || (exception_class == 0b100101);
+        const bool is_writing = is_data_abort && (esr & (1 << 6));
 #else
 #ifdef __APPLE__
-    const uint64_t err = context->uc_mcontext->__es.__err;
+        const uint64_t err = context->uc_mcontext->__es.__err;
 #else
-    const uint64_t err = context->uc_mcontext.gregs[REG_ERR];
+        const uint64_t err = context->uc_mcontext.gregs[REG_ERR];
 #endif
-    const bool is_executing = err & 0x10;
-    const bool is_writing = err & 0x2;
+        const bool is_executing = err & 0x10;
+        const bool is_writing = err & 0x2;
 #endif
 
-    if (!is_executing) {
-        if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
-            return;
+        if (!is_executing) {
+            if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
+                return;
+            }
         }
     }
 
-    LOG_CRITICAL("Unhandled access to 0x{:X}", reinterpret_cast<uintptr_t>(info->si_addr));
-    raise(SIGTRAP);
+    // Genuine crash so record it in our log and flush as users can rarely logcat.
+    uintptr_t crash_pc = 0;
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext->__ss.__pc);
+#else
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext.pc);
+#endif
+#elif defined(__x86_64__)
+#if defined(__APPLE__)
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext->__ss.__rip);
+#else
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext.gregs[REG_RIP]);
+#endif
+#endif
+
+    uintptr_t crash_lr = 0;
+#if defined(__aarch64__) && !defined(__APPLE__)
+    crash_lr = static_cast<uintptr_t>(context->uc_mcontext.regs[30]);
+#elif defined(__aarch64__)
+    crash_lr = static_cast<uintptr_t>(context->uc_mcontext->__ss.__lr);
+#endif
+
+    auto describe = [](uintptr_t addr) -> std::string {
+        if (addr == 0)
+            return "null";
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void *>(addr), &info) == 0 || info.dli_fname == nullptr)
+            return fmt::format("0x{:X} (unmapped)", addr);
+        const uintptr_t off = addr - reinterpret_cast<uintptr_t>(info.dli_fbase);
+        if (info.dli_sname != nullptr)
+            return fmt::format("0x{:X} = {}+0x{:X} ({})", addr, info.dli_fname, off, info.dli_sname);
+        return fmt::format("0x{:X} = {}+0x{:X}", addr, info.dli_fname, off);
+    };
+
+    LOG_CRITICAL("[CRASH] fatal signal {} (si_code {}) at address 0x{:X} - pc {} - lr {} - flushing log and aborting",
+        sig, info->si_code, reinterpret_cast<uintptr_t>(info->si_addr), describe(crash_pc), describe(crash_lr));
+#ifndef _WIN32
+    {
+        struct Bt {
+            uintptr_t pcs[28];
+            int n = 0;
+        } bt;
+        _Unwind_Backtrace([](struct _Unwind_Context *uctx, void *arg) -> _Unwind_Reason_Code {
+            Bt *b = static_cast<Bt *>(arg);
+            const uintptr_t pc = _Unwind_GetIP(uctx);
+            if (pc && b->n < 28)
+                b->pcs[b->n++] = pc;
+            return b->n >= 28 ? _URC_END_OF_STACK : _URC_NO_REASON;
+        },
+            &bt);
+        for (int i = 0; i < bt.n; i++)
+            LOG_CRITICAL("[CRASH] frame #{:02}: {}", i, describe(bt.pcs[i]));
+    }
+#endif
+    logging::flush();
+    signal(sig, SIG_DFL);
+    raise(sig);
     return;
 }
 
@@ -657,12 +1263,46 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
     if (sigaction(SIGSEGV, &sa, NULL) == -1) {
         LOG_CRITICAL("Failed to register an exception handler");
     }
-#ifdef __APPLE__
-    // When accessing memory region which is PROT_NONE on macOS, it is raising SIGBUS not SIGSEGV.
-    // So apply same signal handler to SIGBUS
+    // SIGBUS: on macOS a PROT_NONE access raises it instead of SIGSEGV.
+    // on Android an ARM64 atomic against non-cacheable memory raises it.
+    // Handle it on both so it is logged and not silent.
     if (sigaction(SIGBUS, &sa, NULL) == -1) {
         LOG_CRITICAL("Failed to register an exception handler to SIGBUS");
     }
+    if (sigaction(SIGABRT, &sa, NULL) == -1) {
+        LOG_CRITICAL("Failed to register an exception handler to SIGABRT");
+    }
+    if (sigaction(SIGILL, &sa, NULL) == -1) {
+        LOG_CRITICAL("Failed to register an exception handler to SIGILL");
+    }
+    if (sigaction(SIGTRAP, &sa, NULL) == -1) {
+        LOG_CRITICAL("Failed to register an exception handler to SIGTRAP");
+    }
+}
+
+bool test_arm64_atomics_on(void *ptr) {
+#if defined(__ANDROID__) && defined(__aarch64__)
+    volatile uint32_t *word = static_cast<volatile uint32_t *>(ptr);
+    t_fault_probe_active = true;
+    const int faulted = sigsetjmp(t_fault_probe_jmp, 1);
+    if (faulted == 0) {
+        __atomic_fetch_add(const_cast<uint32_t *>(word), 0u, __ATOMIC_SEQ_CST);
+        uint32_t value, status;
+        asm volatile(
+            "1: ldaxr %w0, [%2]\n"
+            "   stlxr %w1, %w0, [%2]\n"
+            "   cbnz  %w1, 1b\n"
+            : "=&r"(value), "=&r"(status)
+            : "r"(word)
+            : "memory");
+    }
+    t_fault_probe_active = false;
+    if (faulted != 0)
+        LOG_ERROR("ARM64 atomic probe faulted with signal {} on mapping at {}", faulted, ptr);
+    return faulted == 0;
+#else
+    (void)ptr;
+    return true;
 #endif
 }
 

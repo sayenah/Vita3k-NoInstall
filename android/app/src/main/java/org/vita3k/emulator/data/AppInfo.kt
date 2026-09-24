@@ -31,6 +31,8 @@ data class AppInfo(
     val category: String = "",
     val appVer: String = "",
     val iconPath: String? = null,
+    // Non-empty for a ROM entry: launch routes through mount_pkg_for_play(archivePath) with no install.
+    val archivePath: String? = null,
     val hasCustomConfig: Boolean = false,
     val compatibility: CompatibilityState = CompatibilityState.UNKNOWN,
     val lastPlayed: Long = 0,
