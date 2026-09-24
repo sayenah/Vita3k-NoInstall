@@ -16,6 +16,26 @@
 
 BRANCH=feature/game-bundle
 TARGET="${1:-upstream/master}"
+# Files the fork replaces wholesale. If upstream edits one, keep the fork's version instead of
+# stopping (mirrors .github/workflows/update-from-upstream.yml).
+FORK_OWNED_FILES="README.md"
+
+rebase_keeping_fork_owned() {
+  git rebase "$TARGET" && return 0
+  while :; do
+    conflicted=$(git diff --name-only --diff-filter=U)
+    [ -n "$conflicted" ] || return 1
+    for f in $conflicted; do
+      case " $FORK_OWNED_FILES " in *" $f "*) ;; *) return 1 ;; esac
+    done
+    for f in $conflicted; do
+      echo "==> Upstream changed $f; keeping the fork's version."
+      # During a rebase "theirs" is the fork commit being replayed.
+      if git checkout --theirs -- "$f" 2>/dev/null; then git add -- "$f"; else git rm -q -- "$f"; fi
+    done
+    GIT_EDITOR=true git rebase --continue && return 0
+  done
+}
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
@@ -42,7 +62,7 @@ git branch -f "$BACKUP" "$BRANCH"
 echo "==> Snapshot saved: $BACKUP   (undo everything with:  git branch -f $BRANCH $BACKUP)"
 
 echo "==> Rebasing $BRANCH onto $TARGET ..."
-if git rebase "$TARGET"; then
+if rebase_keeping_fork_owned; then
   echo "==> Resyncing submodules (upstream often bumps them)..."
   git submodule update --init --recursive
   if [ ! -f vita3k/io/src/bundle.cpp ]; then

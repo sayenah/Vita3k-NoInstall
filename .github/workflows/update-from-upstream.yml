@@ -27,12 +27,18 @@ concurrency:
   group: update-from-upstream
   cancel-in-progress: false
 
+env:
+  # Files the fork replaces wholesale. When upstream edits one of these, the rebase keeps the
+  # fork's version instead of stopping. Anything else that conflicts still needs a human.
+  FORK_OWNED_FILES: README.md
+  ISSUE_TITLE_PREFIX: "Upstream update needs manual conflict resolution"
+
 jobs:
   rebase-and-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: feature/game-bundle
           fetch-depth: 0
@@ -51,6 +57,7 @@ jobs:
           git fetch upstream --tags --prune
           if git rev-parse --verify "upstream/$REF" >/dev/null 2>&1; then TARGET="upstream/$REF"; else TARGET="$REF"; fi
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "orig=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Target: $TARGET"
 
           # On the weekly auto-run, do nothing if upstream has not moved past what we're built on.
@@ -60,22 +67,38 @@ jobs:
             exit 0
           fi
 
-          # Safety snapshot of the current tip before rewriting history.
-          BACKUP="backup/auto-$(date +%Y%m%d-%H%M%S)"
-          git branch "$BACKUP" feature/game-bundle
-          git push origin "$BACKUP"
-          echo "Backup pushed: $BACKUP"
-
-          if git rebase "$TARGET"; then
-            echo "status=ok" >> "$GITHUB_OUTPUT"
-          else
-            git rebase --abort || true
-            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          status=ok
+          if ! git rebase "$TARGET"; then
+            while :; do
+              conflicted=$(git diff --name-only --diff-filter=U)
+              needs_human=$(printf '%s\n' $conflicted | grep -vxF -f <(printf '%s\n' $FORK_OWNED_FILES) || true)
+              if [ -z "$conflicted" ] || [ -n "$needs_human" ]; then
+                echo "Conflicts needing a human: ${needs_human:-<rebase stopped without file conflicts>}"
+                { echo "conflicts<<EOF"; echo "${needs_human:-<rebase stopped without file conflicts>}"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+                git rebase --abort || true
+                status=conflict
+                break
+              fi
+              # During a rebase "theirs" is the fork commit being replayed, i.e. the fork's version.
+              for f in $conflicted; do
+                echo "Keeping fork's version of $f"
+                if git checkout --theirs -- "$f" 2>/dev/null; then git add -- "$f"; else git rm -q -- "$f"; fi
+              done
+              if GIT_EDITOR=true git rebase --continue; then break; fi
+            done
           fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
 
       - name: Push rebased branch
         if: steps.rebase.outputs.status == 'ok'
-        run: git push --force origin feature/game-bundle
+        run: |
+          # Safety snapshot of the pre-rebase tip, only taken when we are about to rewrite history.
+          BACKUP="backup/auto-$(date +%Y%m%d-%H%M%S)"
+          git push origin "${{ steps.rebase.outputs.orig }}:refs/heads/$BACKUP"
+          echo "Backup pushed: $BACKUP"
+          # Refuse to clobber anything pushed to the branch while this job was running.
+          git push --force-with-lease="feature/game-bundle:${{ steps.rebase.outputs.orig }}" \
+            origin HEAD:feature/game-bundle
 
       - name: Trigger a build of the updated code
         if: steps.rebase.outputs.status == 'ok'
@@ -90,27 +113,56 @@ jobs:
           echo "Rebased onto ${{ steps.rebase.outputs.target }} and started a build."
           echo "A new Release (APK + Windows zip) will appear when the build finishes."
 
+      - name: Close conflict issues that are now resolved
+        if: steps.rebase.outputs.status == 'ok' || steps.rebase.outputs.status == 'uptodate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list -R "${{ github.repository }}" --state open --search "\"$ISSUE_TITLE_PREFIX\" in:title" \
+            --json number -q '.[].number' | while read -r n; do
+            gh issue close "$n" -R "${{ github.repository }}" \
+              --comment "Resolved: the fork now rebases cleanly onto \`${{ steps.rebase.outputs.target }}\` (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          done
+
       - name: File an issue if the rebase needs a human
         if: steps.rebase.outputs.status == 'conflict'
         env:
           GH_TOKEN: ${{ github.token }}
+          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
         run: |
-          gh issue create -R "${{ github.repository }}" \
-            --title "Upstream update needs manual conflict resolution ($(date +%Y-%m-%d))" \
-            --body "Automatic rebase of our patches onto \`${{ steps.rebase.outputs.target }}\` hit a merge conflict and was aborted (nothing was pushed; the branch is unchanged).
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY="Automatic rebase of our patches onto \`${{ steps.rebase.outputs.target }}\` hit a merge conflict and was aborted (nothing was pushed; the branch is unchanged).
+
+          Conflicting files:
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
 
           A developer resolves it locally:
           \`\`\`
-          cd ~/projects/vita3k-bundle
           tools/update-from-upstream.sh ${{ github.event.inputs.upstream_ref || 'master' }}
           # fix the files it lists, then:
           git add <files>; git rebase --continue
           git push --force-with-lease origin feature/game-bundle
           \`\`\`
-          Once pushed, a build runs and a new Release is published automatically." || true
+          Once pushed, a build runs and a new Release is published automatically.
+
+          Run: $RUN_URL"
+
+          # One open issue at a time: add a comment to the existing one instead of opening duplicates.
+          EXISTING=$(gh issue list -R "${{ github.repository }}" --state open \
+            --search "\"$ISSUE_TITLE_PREFIX\" in:title" --json number -q '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" -R "${{ github.repository }}" --body "Still conflicting as of $(date +%Y-%m-%d).
+
+          $BODY" || true
+          else
+            gh issue create -R "${{ github.repository }}" \
+              --title "$ISSUE_TITLE_PREFIX ($(date +%Y-%m-%d))" --body "$BODY" || true
+          fi
 
       - name: Mark the run failed on conflict
         if: steps.rebase.outputs.status == 'conflict'
         run: |
-          echo "::error::Rebase conflict -- see the issue that was just opened."
+          echo "::error::Rebase conflict -- see the open '$ISSUE_TITLE_PREFIX' issue."
           exit 1
