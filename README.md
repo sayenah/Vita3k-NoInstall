@@ -53,8 +53,8 @@ whole time — moving or deleting a game file never touches them.
 - 🔑 **License folder** — keep your `.rif` licenses in one tree (there's a
   [tool](./tools/build-license-folder.py) that builds it from NoPayStation `.tsv` files) and every
   game/update/DLC key is applied automatically.
-- 🔄 **Self-updating** — every Monday the fork rebases itself onto the newest official Vita3K and
-  publishes a fresh build. There's also a one-click button ([how-to](./docs/game-bundle/getting-builds.md)).
+- 🔄 **Self-updating** — every day the fork checks official Vita3K and Vita3K-Plus; when either has
+  something new it rebases onto Vita3K, imports the new Plus fixes, and publishes a fresh build. There's also a one-click button ([how-to](./docs/game-bundle/getting-builds.md)).
 - 🛠️ **Vita3K-Plus game fixes** — includes the compatibility and rendering fixes from
   [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus) (Dead or Alive 5 Plus, Metal Gear Solid 3,
   Killzone, Resistance, LittleBigPlanet, Tearaway and more), plus its Accurate Thread Scheduling setting.
@@ -116,7 +116,7 @@ Add `.zip`, `.7z` and `.pkg` to the system's extension list, and ES-DE launches 
 ## Downloads & staying current
 
 Grab the newest build any time from **[Releases → latest](https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest)**.
-It refreshes automatically every Monday when upstream Vita3K changes; the
+It refreshes automatically (checked daily) whenever upstream Vita3K or Vita3K-Plus changes; the
 [builds guide](./docs/game-bundle/getting-builds.md) shows the one-click "build now" button and what to
 do if an update ever needs a human. Linux and macOS builds are available as
 [CI artifacts](https://github.com/sayenah/Vita3kPlus-NoInstall/actions/workflows/c-cpp.yml).

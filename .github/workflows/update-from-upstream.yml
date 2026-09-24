@@ -1,37 +1,49 @@
 name: Update from upstream
 
-# Rebases this fork's patches (no-install play + library UI) onto a newer upstream
-# Vita3K, then triggers a build. On a clean rebase you get a fresh Release (APK +
-# Windows zip). On a code conflict it opens an Issue instead and does not push --
-# that's the signal a developer needs to resolve it locally.
+# Keeps Vita3K+ NoInstall current with both of its sources, then triggers a build:
+#   1. Vita3K (https://github.com/Vita3K/Vita3K) -- rebases this fork's patches onto upstream.
+#   2. Vita3K-Plus (https://github.com/nckstwrt/Vita3K-Plus) -- imports the enhancements added to its
+#      all-enhancements branch since the last import (tools/import-vita3k-plus.sh; the last imported
+#      commit is recorded in .github/vita3k-plus.ref).
+# When either one moved, the result is pushed and Build CI publishes a fresh "latest" Release (APK +
+# Windows zip). A conflict opens an Issue instead and nothing from that source is pushed -- that's the
+# signal a developer needs to resolve it locally. A Plus conflict doesn't hold back a clean Vita3K
+# update, and vice versa.
 #
-#   * "Run workflow" button (Actions tab) -- pick the upstream branch/tag to track.
-#   * Weekly auto-check (Mondays). Delete the `schedule:` block to turn that off.
+#   * "Run workflow" button (Actions tab) -- optionally pick other upstream/Plus refs to track.
+#   * Daily auto-check. Delete the `schedule:` block to turn that off.
 
 on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: "Upstream branch or tag to update to (e.g. master, v0.2.2)"
+        description: "Upstream Vita3K branch or tag to update to (e.g. master, v0.2.2)"
         required: false
         default: "master"
+      plus_ref:
+        description: "Vita3K-Plus branch or commit to import up to"
+        required: false
+        default: "all-enhancements"
   schedule:
-    - cron: "0 6 * * 1" # every Monday 06:00 UTC
+    - cron: "0 6 * * *" # every day 06:00 UTC
 
 permissions:
-  contents: write # push the rebased branch + backup branches
+  contents: write # push the updated branch + backup branches
   actions: write # trigger the Build CI workflow
-  issues: write # file an issue when a rebase needs a human
+  issues: write # file an issue when an update needs a human
 
 concurrency:
   group: update-from-upstream
   cancel-in-progress: false
 
 env:
+  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'master' }}
+  PLUS_REF: ${{ github.event.inputs.plus_ref || 'all-enhancements' }}
   # Files the fork replaces wholesale. When upstream edits one of these, the rebase keeps the
   # fork's version instead of stopping. Anything else that conflicts still needs a human.
   FORK_OWNED_FILES: README.md
-  ISSUE_TITLE_PREFIX: "Upstream update needs"
+  UPSTREAM_ISSUE_PREFIX: "Upstream update needs"
+  PLUS_ISSUE_PREFIX: "Vita3K-Plus import needs"
   # GitHub refuses GITHUB_TOKEN pushes that touch .github/workflows/, which upstream's CI commits
   # do. A fine-grained PAT (this repo; Contents + Workflows: read/write) saved as the
   # UPSTREAM_SYNC_TOKEN secret lets those updates through. Pushes made with it trigger Build CI
@@ -39,7 +51,7 @@ env:
   HAS_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
 
 jobs:
-  rebase-and-build:
+  update-and-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork (full history)
@@ -54,22 +66,19 @@ jobs:
           git config user.name "vita3kplus-noinstall-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Rebase onto upstream
+      - name: Rebase onto upstream Vita3K
         id: rebase
         run: |
-          REF="${{ github.event.inputs.upstream_ref || 'master' }}"
           git remote add upstream https://github.com/Vita3K/Vita3K.git 2>/dev/null || \
             git remote set-url upstream https://github.com/Vita3K/Vita3K.git
           git fetch upstream --tags --prune
-          if git rev-parse --verify "upstream/$REF" >/dev/null 2>&1; then TARGET="upstream/$REF"; else TARGET="$REF"; fi
+          if git rev-parse --verify "upstream/$UPSTREAM_REF" >/dev/null 2>&1; then TARGET="upstream/$UPSTREAM_REF"; else TARGET="$UPSTREAM_REF"; fi
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          ORIG=$(git rev-parse HEAD)
-          echo "orig=$ORIG" >> "$GITHUB_OUTPUT"
+          echo "orig=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Target: $TARGET"
 
-          # On the weekly auto-run, do nothing if upstream has not moved past what we're built on.
-          if [ "${{ github.event_name }}" = "schedule" ] && git merge-base --is-ancestor "$TARGET" HEAD; then
-            echo "Already up to date with $TARGET -- skipping."
+          if git merge-base --is-ancestor "$TARGET" HEAD; then
+            echo "Already up to date with $TARGET."
             echo "status=uptodate" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -94,20 +103,32 @@ jobs:
               if GIT_EDITOR=true git rebase --continue; then break; fi
             done
           fi
-          if [ "$status" = ok ] && [ "$(git rev-parse HEAD)" = "$ORIG" ]; then
-            echo "Already up to date with $TARGET -- nothing to push."
-            status=uptodate
-          elif [ "$status" = ok ] && [ "$HAS_SYNC_TOKEN" != true ] && \
-             ! git diff --quiet "$ORIG" HEAD -- .github/workflows; then
-            echo "::error::Upstream changed .github/workflows/, which GITHUB_TOKEN may not push. Add the UPSTREAM_SYNC_TOKEN secret."
-            status=needs-token
-          fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
-      - name: Push rebased branch
-        if: steps.rebase.outputs.status == 'ok'
+      # Runs on top of the rebase, or on the unchanged branch when the rebase needed a human.
+      - name: Import new Vita3K-Plus enhancements
+        id: plus
+        run: tools/import-vita3k-plus.sh --ci "$PLUS_REF"
+
+      - name: Decide what to push
+        id: result
         run: |
-          # Safety snapshot of the pre-rebase tip, pushed atomically with the rewrite so a rejected
+          ORIG="${{ steps.rebase.outputs.orig }}"
+          if [ "$(git rev-parse HEAD)" = "$ORIG" ]; then
+            echo "Nothing new from Vita3K or Vita3K-Plus -- nothing to push."
+            outcome=nothing
+          elif [ "$HAS_SYNC_TOKEN" != true ] && ! git diff --quiet "$ORIG" HEAD -- .github/workflows; then
+            echo "::error::Upstream changed .github/workflows/, which GITHUB_TOKEN may not push. Add the UPSTREAM_SYNC_TOKEN secret."
+            outcome=needs-token
+          else
+            outcome=push
+          fi
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+
+      - name: Push updated branch
+        if: steps.result.outputs.outcome == 'push'
+        run: |
+          # Safety snapshot of the pre-update tip, pushed atomically with the rewrite so a rejected
           # push leaves no stray backup. --force-with-lease refuses to clobber anything pushed to the
           # branch while this job was running.
           BACKUP="backup/auto-$(date +%Y%m%d-%H%M%S)"
@@ -116,7 +137,7 @@ jobs:
           echo "Backup pushed: $BACKUP"
 
       - name: Trigger a build of the updated code
-        if: steps.rebase.outputs.status == 'ok' && env.HAS_SYNC_TOKEN != 'true'
+        if: steps.result.outputs.outcome == 'push' && env.HAS_SYNC_TOKEN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -125,30 +146,47 @@ jobs:
           # same run (see the publish-noinstall-release job) — no separate publish workflow to be
           # suppressed by the GITHUB_TOKEN anti-recursion rule.
           gh workflow run c-cpp.yml --ref feature/game-bundle -R "${{ github.repository }}"
-          echo "Rebased onto ${{ steps.rebase.outputs.target }} and started a build."
-          echo "A new Release (APK + Windows zip) will appear when the build finishes."
+          echo "Started a build. A new Release (APK + Windows zip) will appear when it finishes."
 
-      - name: Close conflict issues that are now resolved
-        if: steps.rebase.outputs.status == 'ok' || steps.rebase.outputs.status == 'uptodate'
+      - name: Close issues that are now resolved, file issues that need a human
+        id: issues
         env:
           GH_TOKEN: ${{ github.token }}
+          REBASE_STATUS: ${{ steps.rebase.outputs.status }}
+          REBASE_CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+          TARGET: ${{ steps.rebase.outputs.target }}
+          PLUS_STATUS: ${{ steps.plus.outputs.plus_status }}
+          PLUS_CONFLICTS: ${{ steps.plus.outputs.conflicts }}
+          PLUS_OLD: ${{ steps.plus.outputs.plus_old }}
+          PLUS_NEW: ${{ steps.plus.outputs.plus_new }}
+          OUTCOME: ${{ steps.result.outputs.outcome }}
         run: |
-          gh issue list -R "${{ github.repository }}" --state open --search "\"$ISSUE_TITLE_PREFIX\" in:title" \
-            --json number -q '.[].number' | while read -r n; do
-            gh issue close "$n" -R "${{ github.repository }}" \
-              --comment "Resolved: the fork now rebases cleanly onto \`${{ steps.rebase.outputs.target }}\` (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
-          done
-
-      - name: File an issue if the rebase needs a human
-        if: steps.rebase.outputs.status == 'conflict' || steps.rebase.outputs.status == 'needs-token'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
-        run: |
+          REPO="${{ github.repository }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          if [ "${{ steps.rebase.outputs.status }}" = needs-token ]; then
-            TITLE="$ISSUE_TITLE_PREFIX a token that can update workflows"
-            BODY="Rebasing onto \`${{ steps.rebase.outputs.target }}\` succeeded, but upstream changed files under \`.github/workflows/\`, and GitHub does not let the built-in GITHUB_TOKEN push those. Nothing was pushed; the branch is unchanged.
+          open_issue() { # prefix
+            gh issue list -R "$REPO" --state open --search "\"$1\" in:title" --json number -q '.[0].number'
+          }
+          close_issues() { # prefix message
+            gh issue list -R "$REPO" --state open --search "\"$1\" in:title" --json number -q '.[].number' |
+              while read -r n; do gh issue close "$n" -R "$REPO" --comment "$2 (run $RUN_URL)."; done
+          }
+          # One open issue per source: add a comment to the existing one instead of opening duplicates.
+          file_issue() { # prefix title body
+            local existing
+            existing=$(open_issue "$1")
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" -R "$REPO" --body "Still needs attention as of $(date +%Y-%m-%d).
+
+          $3" || true
+            else
+              gh issue create -R "$REPO" --title "$2 ($(date +%Y-%m-%d))" --body "$3" || true
+            fi
+            echo "needs_human=true" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ "$OUTCOME" = needs-token ]; then
+            file_issue "$UPSTREAM_ISSUE_PREFIX" "$UPSTREAM_ISSUE_PREFIX a token that can update workflows" \
+          "The update succeeded, but upstream Vita3K changed files under \`.github/workflows/\`, and GitHub does not let the built-in GITHUB_TOKEN push those. Nothing was pushed; the branch is unchanged, and no Vita3K or Vita3K-Plus updates ship until this is fixed.
 
           Fix once:
           1. Create a fine-grained personal access token at https://github.com/settings/personal-access-tokens/new, limited to this repository, with **Contents: Read and write** and **Workflows: Read and write**.
@@ -156,18 +194,18 @@ jobs:
           3. Re-run **Update from upstream** from the Actions tab.
 
           Run: $RUN_URL"
-          else
-          TITLE="$ISSUE_TITLE_PREFIX manual conflict resolution"
-          BODY="Automatic rebase of our patches onto \`${{ steps.rebase.outputs.target }}\` hit a merge conflict and was aborted (nothing was pushed; the branch is unchanged).
+          elif [ "$REBASE_STATUS" = conflict ]; then
+            file_issue "$UPSTREAM_ISSUE_PREFIX" "$UPSTREAM_ISSUE_PREFIX manual conflict resolution" \
+          "Automatic rebase of our patches onto \`$TARGET\` hit a merge conflict and was aborted (no Vita3K update was pushed; any Vita3K-Plus update still ships on its own).
 
           Conflicting files:
           \`\`\`
-          $CONFLICTS
+          $REBASE_CONFLICTS
           \`\`\`
 
           A developer resolves it locally:
           \`\`\`
-          tools/update-from-upstream.sh ${{ github.event.inputs.upstream_ref || 'master' }}
+          tools/update-from-upstream.sh $UPSTREAM_REF
           # fix the files it lists, then:
           git add <files>; git rebase --continue
           git push --force-with-lease origin feature/game-bundle
@@ -175,22 +213,41 @@ jobs:
           Once pushed, a build runs and a new Release is published automatically.
 
           Run: $RUN_URL"
+          else
+            close_issues "$UPSTREAM_ISSUE_PREFIX" "Resolved: the fork is up to date with \`$TARGET\`"
           fi
 
-          # One open issue at a time: add a comment to the existing one instead of opening duplicates.
-          EXISTING=$(gh issue list -R "${{ github.repository }}" --state open \
-            --search "\"$ISSUE_TITLE_PREFIX\" in:title" --json number -q '.[0].number')
-          if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" -R "${{ github.repository }}" --body "Still conflicting as of $(date +%Y-%m-%d).
+          if [ "$PLUS_STATUS" = conflict ]; then
+            file_issue "$PLUS_ISSUE_PREFIX" "$PLUS_ISSUE_PREFIX manual conflict resolution" \
+          "Importing Vita3K-Plus \`${PLUS_OLD:0:8}..${PLUS_NEW:0:8}\` (https://github.com/nckstwrt/Vita3K-Plus/compare/$PLUS_OLD...$PLUS_NEW) hit a conflict with this fork and was undone (no Plus update was pushed; any Vita3K update still ships on its own).
 
-          $BODY" || true
-          else
-            gh issue create -R "${{ github.repository }}" \
-              --title "$TITLE ($(date +%Y-%m-%d))" --body "$BODY" || true
+          \`\`\`
+          $PLUS_CONFLICTS
+          \`\`\`
+
+          A developer resolves it locally on \`feature/game-bundle\`:
+          \`\`\`
+          tools/import-vita3k-plus.sh $PLUS_REF
+          # fix the files it lists, then:
+          git add <files>; git cherry-pick --continue   # repeat if it stops again
+          tools/import-vita3k-plus.sh --finish
+          git push origin feature/game-bundle
+          \`\`\`
+
+          Run: $RUN_URL"
+          elif [ "$PLUS_STATUS" = rewritten ]; then
+            file_issue "$PLUS_ISSUE_PREFIX" "$PLUS_ISSUE_PREFIX a human: its history was rewritten" \
+          "Vita3K-Plus \`$PLUS_REF\` (now \`${PLUS_NEW:0:8}\`) no longer contains \`${PLUS_OLD:0:8}\`, the commit this fork last imported, so the new enhancements can't be picked out automatically. Nothing from Plus was pushed.
+
+          A developer compares the two (https://github.com/nckstwrt/Vita3K-Plus/compare/$PLUS_OLD...$PLUS_NEW), brings the new changes over by hand, and sets \`.github/vita3k-plus.ref\` to \`$PLUS_NEW\`. Later imports then resume automatically.
+
+          Run: $RUN_URL"
+          elif [ "$OUTCOME" != needs-token ]; then
+            close_issues "$PLUS_ISSUE_PREFIX" "Resolved: the fork has Vita3K-Plus \`${PLUS_NEW:0:8}\`"
           fi
 
       - name: Mark the run failed when a human is needed
-        if: steps.rebase.outputs.status == 'conflict' || steps.rebase.outputs.status == 'needs-token'
+        if: steps.issues.outputs.needs_human == 'true'
         run: |
-          echo "::error::Upstream update needs attention (${{ steps.rebase.outputs.status }}) -- see the open issue."
+          echo "::error::An update needs attention -- see the open issue."
           exit 1

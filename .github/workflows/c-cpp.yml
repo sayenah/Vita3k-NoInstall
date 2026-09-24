@@ -431,6 +431,7 @@ jobs:
         run: |
           SHA="${{ github.sha }}"
           BUILD=$(git -C src rev-list --count "$SHA")
+          PLUS=$(git -C src show "$SHA:.github/vita3k-plus.ref" 2>/dev/null || true)
           if [ -z "$(ls -A out 2>/dev/null)" ]; then
             echo "::warning::no Android/Windows artifacts on this build run -- nothing to publish, leaving the existing release in place"
             exit 0
@@ -438,7 +439,7 @@ jobs:
           gh release delete latest -R "${{ github.repository }}" --yes --cleanup-tag || true
           gh release create latest -R "${{ github.repository }}" out/* \
             --title "Vita3K+ NoInstall build ${BUILD}" \
-            --notes "Automatically built from commit \`${SHA}\`.
+            --notes "Automatically built from commit \`${SHA}\`${PLUS:+, with Vita3K-Plus enhancements up to [\`${PLUS:0:8}\`](https://github.com/nckstwrt/Vita3K-Plus/commit/${PLUS})}.
 
           Vita3K Build: ${BUILD}
 

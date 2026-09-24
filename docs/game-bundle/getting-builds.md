@@ -12,8 +12,8 @@ page, where you download the app.
 
 ## Option A — just wait (automatic)
 
-Every **Monday**, GitHub automatically checks whether the official Vita3K changed.
-If it did (and there's no conflict), it builds a new version and posts it to Releases.
+Every **day**, GitHub automatically checks whether the official Vita3K or Vita3K-Plus changed.
+If either did (and there's no conflict), it builds a new version and posts it to Releases.
 
 So most of the time you just:
 
@@ -26,12 +26,12 @@ That's it.
 
 ## Option B — get a build right now (the button)
 
-If you don't want to wait for Monday, or a new Vita3K just came out:
+If you don't want to wait for the daily check, or a new Vita3K or Vita3K-Plus just came out:
 
 1. Open **https://github.com/sayenah/Vita3kPlus-NoInstall/actions/workflows/update-from-upstream.yml**
    (You may need to be signed in to your GitHub account.)
 2. Click the grey **"Run workflow"** button on the right.
-3. Leave the box set to `master` and click the green **"Run workflow"**.
+3. Leave the boxes as they are (`master` and `all-enhancements`) and click the green **"Run workflow"**.
 4. Wait about **30–45 minutes** (it's building the whole emulator for phone + PC).
 5. Go to **https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest** and download.
 
@@ -78,10 +78,11 @@ enabled, and the workflow token has write access (proven by the auto-created
 Workflows (all conflict-free, since they're new files upstream never touches):
 
 - **`.github/workflows/update-from-upstream.yml`** — `workflow_dispatch` (the button) +
-  a weekly `schedule`. Snapshots the branch to `backup/auto-<timestamp>`, rebases our
-  commits onto the chosen upstream ref, force-pushes, then dispatches Build CI. On a
-  rebase conflict it opens an issue and stops (no push). To turn off the weekly run,
-  delete the `schedule:` block.
+  a daily `schedule`. Rebases our commits onto the chosen upstream ref, then imports any
+  new Vita3K-Plus commits with `tools/import-vita3k-plus.sh`. If either changed anything it
+  snapshots the old tip to `backup/auto-<timestamp>`, force-pushes, then dispatches Build CI.
+  A conflict on either side opens an issue for that side and skips only that side's update.
+  To turn off the daily run, delete the `schedule:` block.
 - **`c-cpp.yml`** — Build CI. Two fork changes: a `workflow_dispatch:` trigger so the update
   workflow can start it (a `GITHUB_TOKEN` push does not fire push-triggered workflows), and a
   final **`publish-noinstall-release`** job that packages the Android + Windows artifacts and
