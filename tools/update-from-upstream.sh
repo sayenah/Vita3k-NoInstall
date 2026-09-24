@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Carry the Vita3K-NoInstall patch series onto a newer upstream Vita3K.
+# Carry the Vita3K+ NoInstall patch series onto a newer upstream Vita3K.
 #
 # Usage:
 #   tools/update-from-upstream.sh [upstream-ref]

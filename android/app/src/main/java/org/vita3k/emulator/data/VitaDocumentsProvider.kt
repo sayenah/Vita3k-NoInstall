@@ -132,8 +132,8 @@ class VitaDocumentsProvider : DocumentsProvider() {
             add(Document.COLUMN_DOCUMENT_ID, docId)
             add(Document.COLUMN_MIME_TYPE, mimeType(file))
             add(Document.COLUMN_DISPLAY_NAME, when {
-                docId == DOC_ROOT -> "Vita3K NoInstall"
-                docId == DOC_ROOT_STORAGE -> "Vita3K NoInstall storage"
+                docId == DOC_ROOT -> "Vita3K+ NoInstall"
+                docId == DOC_ROOT_STORAGE -> "Vita3K+ NoInstall storage"
                 else -> file.name
             })
             add(Document.COLUMN_LAST_MODIFIED, file.lastModified())
@@ -149,7 +149,7 @@ class VitaDocumentsProvider : DocumentsProvider() {
             add(Root.COLUMN_ROOT_ID, ROOT_ID)
             add(Root.COLUMN_FLAGS, Root.FLAG_SUPPORTS_CREATE or Root.FLAG_SUPPORTS_IS_CHILD or Root.FLAG_LOCAL_ONLY)
             add(Root.COLUMN_ICON, R.mipmap.ic_launcher)
-            add(Root.COLUMN_TITLE, "Vita3K NoInstall")
+            add(Root.COLUMN_TITLE, "Vita3K+ NoInstall")
             add(Root.COLUMN_SUMMARY, runCatching { context?.getString(R.string.documents_root_summary) }.getOrNull())
             add(Root.COLUMN_DOCUMENT_ID, DOC_ROOT)
             add(Root.COLUMN_AVAILABLE_BYTES, runCatching { appFiles?.usableSpace }.getOrNull() ?: 0L)
@@ -160,7 +160,7 @@ class VitaDocumentsProvider : DocumentsProvider() {
                 add(Root.COLUMN_ROOT_ID, ROOT_ID_STORAGE)
                 add(Root.COLUMN_FLAGS, Root.FLAG_SUPPORTS_CREATE or Root.FLAG_SUPPORTS_IS_CHILD or Root.FLAG_LOCAL_ONLY)
                 add(Root.COLUMN_ICON, R.mipmap.ic_launcher)
-                add(Root.COLUMN_TITLE, "Vita3K NoInstall storage")
+                add(Root.COLUMN_TITLE, "Vita3K+ NoInstall storage")
                 add(Root.COLUMN_SUMMARY, runCatching { context?.getString(R.string.documents_storage_root_summary) }.getOrNull())
                 add(Root.COLUMN_DOCUMENT_ID, DOC_ROOT_STORAGE)
                 add(Root.COLUMN_AVAILABLE_BYTES, runCatching { storage?.usableSpace }.getOrNull() ?: 0L)

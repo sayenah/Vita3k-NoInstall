@@ -1,12 +1,12 @@
 set(VITA3K_ORG_NAME "Vita3K")
 # APP_NAME is the on-disk data folder name; DISPLAY_NAME is what the user sees
-set(VITA3K_APP_NAME "Vita3kPlus-Noinstall")
-set(VITA3K_APP_ID "io.github.sayenah.vita3knoinstall")
+set(VITA3K_APP_NAME "Vita3kPlus-NoInstall")
+set(VITA3K_APP_ID "io.github.sayenah.vita3kplusnoinstall")
 set(VITA3K_APP_VER_HI 0)
 set(VITA3K_APP_VER_MID 2)
 set(VITA3K_APP_VER_LO 1)
 set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}.${VITA3K_APP_VER_LO}")
-set(VITA3K_DISPLAY_NAME "Vita3K NoInstall")
+set(VITA3K_DISPLAY_NAME "Vita3K+ NoInstall")
 
 execute_process(
 	COMMAND git rev-list HEAD --count
@@ -307,8 +307,8 @@ if(APPLE)
 	set_target_properties(vita3k PROPERTIES LINK_FLAGS "-rpath @loader_path/../Frameworks/ -rpath @loader_path/../Resources/ -ld64")
 	target_sources(vita3k PRIVATE Vita3K.icns)
 	set(MACOSX_BUNDLE_ICON_FILE Vita3K.icns)
-	set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.github.Vita3K.Vita3K")
-	set(MACOSX_BUNDLE_BUNDLE_NAME "Vita3K")
+	set(MACOSX_BUNDLE_GUI_IDENTIFIER "${VITA3K_APP_ID}")
+	set(MACOSX_BUNDLE_BUNDLE_NAME "${VITA3K_DISPLAY_NAME}")
 
 	message(STATUS "MoltenVK dylib path: ${MOLTENVK_DYLIB}")
 	target_sources(vita3k PRIVATE ${MOLTENVK_DYLIB})

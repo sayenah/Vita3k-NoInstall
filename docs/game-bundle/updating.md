@@ -1,4 +1,4 @@
-# Updating Vita3K-NoInstall to a newer upstream Vita3K
+# Updating Vita3K+ NoInstall to a newer upstream Vita3K
 
 This fork is a compact patch series (~13 commits: the no-install mount +
 archive decrypt, the ROMs/DLC/Updates/License folders, the library UI, CI, and
@@ -37,7 +37,7 @@ git push --force-with-lease origin feature/game-bundle   # triggers Build CI
 tools/fetch-latest-build.sh                              # waits for green, downloads
 ```
 
-Artifacts land in `…/Downloads/Vita3k-NoInstall/<platform>/` — the Android APK
+Artifacts land in `…/Downloads/Vita3kPlus-NoInstall/<platform>/` — the Android APK
 at `…/android/app.apk`, Windows under `…/windows-x64/`. Pass platform names to
 fetch others, e.g. `tools/fetch-latest-build.sh android windows-x64 macos-arm64`.
 

@@ -51,7 +51,7 @@ jobs:
 
       - name: Configure git identity
         run: |
-          git config user.name "vita3k-noinstall-bot"
+          git config user.name "vita3kplus-noinstall-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Rebase onto upstream

@@ -1,4 +1,4 @@
-# Getting a fresh Vita3K-NoInstall build (no coding needed)
+# Getting a fresh Vita3K+ NoInstall build (no coding needed)
 
 This fork adds "play games with no install" + a ROMs-folder library on top of the
 official Vita3K. When the official Vita3K team updates their emulator, you can pull
@@ -17,7 +17,7 @@ If it did (and there's no conflict), it builds a new version and posts it to Rel
 
 So most of the time you just:
 
-1. Go to **https://github.com/sayenah/Vita3k-NoInstall/releases/latest**
+1. Go to **https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest**
 2. Download the file you need (see [Installing](#installing) below).
 
 That's it.
@@ -28,12 +28,12 @@ That's it.
 
 If you don't want to wait for Monday, or a new Vita3K just came out:
 
-1. Open **https://github.com/sayenah/Vita3k-NoInstall/actions/workflows/update-from-upstream.yml**
+1. Open **https://github.com/sayenah/Vita3kPlus-NoInstall/actions/workflows/update-from-upstream.yml**
    (You may need to be signed in to your GitHub account.)
 2. Click the grey **"Run workflow"** button on the right.
 3. Leave the box set to `master` and click the green **"Run workflow"**.
 4. Wait about **30–45 minutes** (it's building the whole emulator for phone + PC).
-5. Go to **https://github.com/sayenah/Vita3k-NoInstall/releases/latest** and download.
+5. Go to **https://github.com/sayenah/Vita3kPlus-NoInstall/releases/latest** and download.
 
 You can close the tab and come back later — it keeps running on GitHub's servers.
 
@@ -43,12 +43,12 @@ You can close the tab and come back later — it keeps running on GitHub's serve
 
 On the Releases page you'll see up to two files:
 
-- **`Vita3K-NoInstall.apk`** — for your **Android** phone/tablet.
+- **`Vita3kPlus-NoInstall.apk`** — for your **Android** phone/tablet.
   Download it on the device, open it, and tap **Install** (Android may ask you to
   "allow installing from this source" the first time — say yes). It installs over the
   old version; your settings and ROMs folder stay.
 
-- **`Vita3K-NoInstall-windows-x64.zip`** — for **Windows**.
+- **`Vita3kPlus-NoInstall-windows-x64.zip`** — for **Windows**.
   Download, right-click → **Extract All**, then open the `bin` folder and run
   **`Vita3K.exe`**.
 
