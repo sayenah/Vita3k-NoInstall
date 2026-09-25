@@ -127,11 +127,11 @@ foreach ($game in $games) {
         $row.message = $Matches[1]
     }
     $rows.Add($row)
-    $rows | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding utf8
+    $rows | Export-Csv -LiteralPath $resultsPath -Encoding utf8
     Write-Host ("    {0}: {1}" -f $row.status, $row.message)
 }
 
-$rows | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding utf8
+$rows | Export-Csv -LiteralPath $resultsPath -Encoding utf8
 $ok = @($rows | Where-Object status -eq 'ok').Count
 $failed = @($rows | Where-Object status -eq 'failed').Count
 $skipped = @($rows | Where-Object status -eq 'skipped').Count

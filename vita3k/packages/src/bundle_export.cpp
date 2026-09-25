@@ -142,6 +142,11 @@ bool export_game_bundle(EmuEnvState &emuenv, const fs::path &input_path, const f
         return false;
     }
     ec.clear();
+    // Without side folders there is nothing to combine, and a base-only zip would look complete.
+    if (emuenv.cfg.updates_folder.empty() && emuenv.cfg.dlc_folder.empty() && emuenv.cfg.license_folder.empty()) {
+        error_out = "no Updates, DLCs or License folder is configured, so there is nothing to combine";
+        return false;
+    }
 
     const fs::path temp_root = emuenv.cache_path / "pkgexport";
     result.title_id = prepare_game_tree(emuenv, input_path, temp_root, error_out);
@@ -165,7 +170,7 @@ bool export_game_bundle(EmuEnvState &emuenv, const fs::path &input_path, const f
             break;
         if (fs::is_directory(it->path(), ec)) {
             if (fs::is_directory(it->path() / "sce_pfs", ec)) {
-                error_out = "DLC " + it->path().filename().string() + " is still encrypted (no license for it?)";
+                error_out = "DLC " + it->path().filename().string() + " could not be decrypted (missing license, or the dump was altered)";
                 cleanup();
                 return false;
             }

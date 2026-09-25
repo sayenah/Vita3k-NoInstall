@@ -135,7 +135,8 @@ path uses (into `<cache>/pkgexport`), then zips the result with the game's rifs 
 to `ux0/license`. Before writing it checks the prepared tree against the validator's independent
 inventory (`inventory_validation_content`): the effective `app_version` must equal the selected update's,
 every expected DLC id must be present, and no addcont tree may still hold `sce_pfs/`. Any failure means
-no zip (exit 2). Output is written to `<zip>.partial` and renamed when complete; an existing output is
+no zip (exit 2), and so does having no Updates, DLCs or License folder configured at all (a base-only zip
+would otherwise look complete). Output is written to `<zip>.partial` and renamed when complete; an existing output is
 never overwritten. `tools/export-library.ps1` drives it over a library.
 
 ## 5. Verified Code Map (where everything hooks)
