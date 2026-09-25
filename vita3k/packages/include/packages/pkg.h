@@ -95,6 +95,12 @@ std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path
 bool read_pkg_param_sfo(const fs::path &pkg_path, std::vector<uint8_t> &sfo_out);
 bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path, const std::function<void(float)> &progress_callback = nullptr);
 
+// Decrypts/unpacks a game (a NoNpDrm .pkg, or a .zip/.7z holding a pkg or a decrypted app/ tree)
+// into `temp_root`, overlays its latest update, brings in its (decrypted) DLC under addcont/, writes
+// vita3k_bundle.json and places its licenses on the real ux0/license. Returns the title id, or ""
+// on failure (error_out set, temp_root removed). This is the tree mount_pkg_for_play mounts.
+std::string prepare_game_tree(EmuEnvState &emuenv, const fs::path &input_path, const fs::path &temp_root, std::string &error_out);
+
 // Decrypts a self-contained (NoNpDrm) base-game pkg to a private temp dir, drops its license rif on
 // the real ux0/license, and mounts the temp tree read-only (io.mount) so it can be booted with no
 // permanent install. Returns the title id to boot (run_app_path), or "" on failure (error_out set).

@@ -44,6 +44,10 @@
 #include <util/log.h>
 #include <util/string_utils.h>
 
+#include <array>
+#include <cstring>
+#include <iterator>
+
 // Credits to mmozeiko https://github.com/mmozeiko/pkg2zip
 
 static void ctr_init(uint8_t *counter, uint8_t *iv, uint64_t n) {
@@ -423,18 +427,37 @@ static bool zip_has_decrypted_game(const fs::path &zip_path) {
 // After extracting a decrypted-game zip into temp_root, find the app tree (the dir holding
 // sce_sys/param.sfo) wherever it sits (app/, app/<TITLEID>/, <TITLEID>/, …) and move it to
 // temp_root/app so the directory-backend mount can serve it. Renames within temp are cheap.
+// DLC (addcont/) and update (patch/) trees carry their own sce_sys/param.sfo, so they are never
+// taken for the game; an app/ tree wins over any other location, and the shallowest match wins so a
+// game's own nested sce_sys folders (e.g. a save-data template) are not mistaken for its root.
 static bool normalize_app_tree(const fs::path &temp_root, std::string &error_out) {
     boost::system::error_code ec;
     fs::path app_dir;
+    bool app_dir_under_app = false;
+    std::ptrdiff_t app_dir_depth = 0;
     for (fs::recursive_directory_iterator it(temp_root, ec), end; it != end; it.increment(ec)) {
         if (ec)
             break;
         const fs::path p = it->path();
-        if (p.filename() == "param.sfo" && p.parent_path().filename() == "sce_sys") {
-            app_dir = p.parent_path().parent_path();
-            break;
+        const std::string name = string_utils::tolower(p.filename().string());
+        if ((name == "addcont" || name == "patch" || name == "license") && fs::is_directory(p, ec)) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (name == "param.sfo" && p.parent_path().filename() == "sce_sys") {
+            const fs::path dir = p.parent_path().parent_path();
+            const fs::path rel = dir.lexically_relative(temp_root);
+            const bool under_app = !rel.empty() && string_utils::tolower(rel.begin()->string()) == "app";
+            const std::ptrdiff_t depth = std::distance(rel.begin(), rel.end());
+            if (app_dir.empty() || (under_app && !app_dir_under_app) || (under_app == app_dir_under_app && depth < app_dir_depth)) {
+                app_dir = dir;
+                app_dir_under_app = under_app;
+                app_dir_depth = depth;
+            }
         }
     }
+    if (fs::is_directory(temp_root / "patch", ec))
+        LOG_WARN("Archive has a patch/ folder; it is not applied. Merge the update into app/ or use the Updates folder.");
     if (app_dir.empty()) {
         error_out = "no sce_sys/param.sfo found inside the zip";
         return false;
@@ -656,6 +679,65 @@ static void decrypt_dlc_pkgs_under(EmuEnvState &emuenv, const fs::path &dir, con
             continue;
         if (match_all || pkg_header_title_id(p) == title_id)
             decrypt_dlc_pkg(emuenv, p, temp_root);
+    }
+}
+
+// The license rif for DLC `dlc_id` (the addcont folder name, i.e. the content id suffix): the
+// tree's own work.bin, else the ux0/license/<title_id> rif whose content id ends with it.
+static fs::path find_addcont_rif(EmuEnvState &emuenv, const fs::path &dlc_dir, const std::string &title_id, const std::string &dlc_id) {
+    boost::system::error_code ec;
+    const fs::path work_bin = dlc_dir / "sce_sys/package/work.bin";
+    if (fs::is_regular_file(work_bin, ec))
+        return work_bin;
+    const fs::path lic_dir = emuenv.vita_fs_path / "ux0/license" / title_id;
+    for (fs::directory_iterator it(lic_dir, ec), end; it != end; it.increment(ec)) {
+        if (ec)
+            break;
+        if (string_utils::tolower(it->path().extension().string()) != ".rif")
+            continue;
+        std::array<char, 0x40> head{};
+        fs::ifstream rif(it->path(), std::ios::in | std::ios::binary);
+        if (!rif.read(head.data(), head.size()))
+            continue;
+        const std::string content_id(head.data() + 0x10, strnlen(head.data() + 0x10, 0x30)); // SceNpDrmLicense::content_id
+        if (content_id.size() > 20 && content_id.substr(20) == dlc_id)
+            return it->path();
+    }
+    return {};
+}
+
+// DLC dumped in NoNpDrm form (an addcont tree that still has sce_pfs/) is PFS-encrypted: mounted
+// as-is the game reads ciphertext. Decrypt each such tree in place with its license, exactly as an
+// archive install does. Trees without a license are left untouched (and warned about).
+static void decrypt_pfs_addcont(EmuEnvState &emuenv, const fs::path &temp_root, const std::string &title_id) {
+    boost::system::error_code ec;
+    std::vector<fs::path> encrypted; // collected first: decrypting renames entries of this directory
+    for (fs::directory_iterator it(temp_root / "addcont", ec), end; it != end; it.increment(ec)) {
+        if (ec)
+            break;
+        if (fs::is_directory(it->path() / "sce_pfs", ec))
+            encrypted.push_back(it->path());
+    }
+    for (fs::path src : encrypted) {
+        const std::string dlc_id = src.filename().string();
+        const fs::path rif = find_addcont_rif(emuenv, src, title_id, dlc_id);
+        if (rif.empty()) {
+            LOG_WARN("DLC: {} is encrypted and no license was found for it; left encrypted", dlc_id);
+            continue;
+        }
+        fs::ifstream binfile(rif, std::ios::in | std::ios::binary | std::ios::ate);
+        std::string zrif = rif2zrif(binfile);
+        fs::path dst = fs_utils::path_concat(src, "_dec");
+        fs::remove_all(dst, ec);
+        std::string f00d_arg;
+        if (execute(zrif, src, dst, F00DEncryptorTypes::native, f00d_arg) < 0) {
+            LOG_WARN("DLC: could not decrypt {}; left encrypted", dlc_id);
+            fs::remove_all(dst, ec);
+            continue;
+        }
+        fs::remove_all(src, ec);
+        fs::rename(dst, src, ec);
+        LOG_INFO("DLC: decrypted {}", dlc_id);
     }
 }
 
@@ -940,9 +1022,8 @@ static void mount_licenses_for_game(EmuEnvState &emuenv, const std::string &titl
         extract_license_rifs_from_zip(lic_zip, title_id, dst);
 }
 
-std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
+std::string prepare_game_tree(EmuEnvState &emuenv, const fs::path &input_path, const fs::path &temp_root, std::string &error_out) {
     boost::system::error_code ec;
-    const fs::path temp_root = emuenv.cache_path / "pkgplay";
     fs::remove_all(temp_root, ec); // clear any stale temp (e.g. after a crash)
     fs::create_directories(temp_root, ec);
 
@@ -1064,6 +1145,7 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
         mount_licenses_for_game(emuenv, title_id); // place game+update+DLC rifs before decrypting them
         mount_updates_for_game(emuenv, temp_root, title_id);
         mount_dlc_for_game(emuenv, temp_root, title_id);
+        decrypt_pfs_addcont(emuenv, temp_root, title_id);
         emuenv.app_info = saved_app_info;
     }
 
@@ -1073,6 +1155,15 @@ std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, 
         mf << "{\"version\":1,\"title_id\":\"" << title_id << "\",\"content_id\":\"" << content_id
            << "\",\"category\":\"" << category << "\",\"has_patch\":false,\"dlc\":[]}";
     }
+    return title_id;
+}
+
+std::string mount_pkg_for_play(EmuEnvState &emuenv, const fs::path &input_path, std::string &error_out) {
+    boost::system::error_code ec;
+    const fs::path temp_root = emuenv.cache_path / "pkgplay";
+    const std::string title_id = prepare_game_tree(emuenv, input_path, temp_root, error_out);
+    if (title_id.empty())
+        return {};
 
     bundle::Manifest manifest;
     std::string berr;
