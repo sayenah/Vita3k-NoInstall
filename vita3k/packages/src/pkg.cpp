@@ -44,6 +44,7 @@
 #include <util/log.h>
 #include <util/string_utils.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <iterator>
@@ -841,7 +842,7 @@ static std::string pkg_app_version(EmuEnvState &emuenv, const fs::path &pkg_path
 }
 
 // Decrypt one update .pkg into temp_root/__update_stage and merge it over temp_root/app.
-static void apply_update_pkg(EmuEnvState &emuenv, const fs::path &pkg_path, const fs::path &temp_root) {
+static bool apply_update_pkg(EmuEnvState &emuenv, const fs::path &pkg_path, const fs::path &temp_root) {
     boost::system::error_code ec;
     // Only apply actual updates (category "gp"). A stray base game ("gd") would otherwise make
     // install_pkg wipe and re-decrypt temp_root/app; a DLC ("ac") would no-op.
@@ -851,7 +852,7 @@ static void apply_update_pkg(EmuEnvState &emuenv, const fs::path &pkg_path, cons
         sfo::get_param_info(info, sfo, emuenv.cfg.sys_lang);
         if (info.app_category != "gp") {
             LOG_INFO("Update: skipping {} -- not an update (category '{}')", fs_utils::path_to_utf8(pkg_path.filename()), info.app_category);
-            return;
+            return false;
         }
     }
     const fs::path stage = temp_root / "__update_stage";
@@ -860,11 +861,12 @@ static void apply_update_pkg(EmuEnvState &emuenv, const fs::path &pkg_path, cons
     if (!install_pkg(pkg_path, emuenv, zrif, [](float) {}, temp_root)) {
         LOG_WARN("Update: could not decrypt {}", fs_utils::path_to_utf8(pkg_path.filename()));
         fs::remove_all(stage, ec);
-        return;
+        return false;
     }
     merge_tree(stage, temp_root / "app");
     fs::remove_all(stage, ec);
     LOG_INFO("Update: applied {}", fs_utils::path_to_utf8(pkg_path.filename()));
+    return true;
 }
 
 // Collect update .pkg candidates under `dir` (recursive). match_all=false keeps only pkgs whose
@@ -933,18 +935,20 @@ static void mount_updates_for_game(EmuEnvState &emuenv, const fs::path &temp_roo
             candidates.push_back(p);
     }
 
-    // Apply only the highest-version update (Vita patches are cumulative full replacements).
-    if (!candidates.empty()) {
-        fs::path best;
-        std::string best_ver;
-        for (const auto &c : candidates) {
-            const std::string v = pkg_app_version(emuenv, c);
-            if (best.empty() || v > best_ver) {
-                best = c;
-                best_ver = v;
-            }
-        }
-        apply_update_pkg(emuenv, best, temp_root);
+    // Apply only the highest-version update (Vita patches are cumulative full replacements). Try the
+    // candidates newest first -- ties broken by file name so every host picks the same one -- and fall
+    // back to the next when one can't be decrypted (e.g. two pkgs of one version, one unusable).
+    std::vector<std::pair<std::string, fs::path>> ordered;
+    for (const auto &c : candidates)
+        ordered.emplace_back(pkg_app_version(emuenv, c), c);
+    std::sort(ordered.begin(), ordered.end(), [](const auto &a, const auto &b) {
+        if (a.first != b.first)
+            return a.first > b.first;
+        return a.second.filename() < b.second.filename();
+    });
+    for (const auto &[version, pkg] : ordered) {
+        if (apply_update_pkg(emuenv, pkg, temp_root))
+            break;
     }
     fs::remove_all(scratch, ec);
 }
