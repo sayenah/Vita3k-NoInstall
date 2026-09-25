@@ -28,8 +28,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Vita3KExe,
 
-    # Only convert games whose file name matches this wildcard (e.g. "SteamWorld*").
-    [string]$Filter = "*",
+    # Only convert games whose file name matches one of these wildcards (e.g. "SteamWorld*").
+    [string[]]$Filter = @("*"),
 
     # Vita3K's log file; defaults to vita3k.log next to the executable.
     [string]$LogPath = ""
@@ -51,7 +51,7 @@ $resultsPath = Join-Path $OutputFolder "export-results.csv"
 $games = foreach ($root in $RomsFolder) {
     $rootPath = (Resolve-Path -LiteralPath $root).Path
     Get-ChildItem -LiteralPath $rootPath -Recurse -File |
-        Where-Object { $_.Extension -in '.zip', '.7z', '.pkg' -and $_.Name -like $Filter } |
+        Where-Object { $name = $_.Name; $_.Extension -in '.zip', '.7z', '.pkg' -and @($Filter | Where-Object { $name -like $_ }).Count -gt 0 } |
         Where-Object { -not $_.FullName.StartsWith($OutputFolder, [StringComparison]::OrdinalIgnoreCase) } |
         ForEach-Object {
             $relative = $_.FullName.Substring($rootPath.Length).TrimStart('\', '/')
