@@ -31,7 +31,8 @@ param(
     # Only convert games whose file name matches one of these wildcards (e.g. "SteamWorld*").
     [string[]]$Filter = @("*"),
 
-    # Vita3K's log file; defaults to vita3k.log next to the executable.
+    # Vita3K's log file; defaults to portable\vita3k.log (portable installs), else vita3k.log next
+    # to the executable.
     [string]$LogPath = ""
 )
 
@@ -41,7 +42,11 @@ if (-not (Test-Path -LiteralPath $Vita3KExe -PathType Leaf)) {
     throw "Vita3K executable not found: $Vita3KExe"
 }
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
-    $LogPath = Join-Path (Split-Path -Parent $Vita3KExe) "vita3k.log"
+    $exeDir = Split-Path -Parent $Vita3KExe
+    $LogPath = Join-Path $exeDir "portable\vita3k.log"
+    if (-not (Test-Path -LiteralPath (Join-Path $exeDir "portable"))) {
+        $LogPath = Join-Path $exeDir "vita3k.log"
+    }
 }
 
 New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
@@ -111,6 +116,12 @@ foreach ($game in $games) {
         $row.licenses = $Matches[4]
         $row.output_mb = [int]((Get-Item -LiteralPath $game.Output).Length / 1MB)
         $row.message = "${seconds}s"
+    }
+    elseif ($exitCode -eq 0 -and (Test-Path -LiteralPath $game.Output)) {
+        # Vita3K only exits 0 after writing a complete zip; the details just weren't in the log.
+        $row.status = "ok"
+        $row.output_mb = [int]((Get-Item -LiteralPath $game.Output).Length / 1MB)
+        $row.message = "${seconds}s (no EXPORT line found in $LogPath)"
     }
     elseif ($logLine -match 'EXPORT FAILED for .*?: (.*)$') {
         $row.message = $Matches[1]
