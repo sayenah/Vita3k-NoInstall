@@ -32,6 +32,7 @@
 #include <io/bundle.h>
 #include <io/state.h>
 #include <modules/module_parent.h>
+#include <packages/bundle_export.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -466,6 +467,23 @@ int main(int argc, char *argv[]) {
         if (!app::init_apps_list(emuenv)) {
             LOG_ERROR("Failed to refresh apps list after content install.");
         }
+    }
+
+    // Convert one game into a single self-contained zip and quit; nothing is booted.
+    if (emuenv.cfg.export_bundle_path.has_value()) {
+        const fs::path source_path = *emuenv.cfg.export_bundle_path;
+        BundleExportResult export_result;
+        std::string export_error;
+        if (!export_game_bundle(emuenv, source_path, *emuenv.cfg.export_output_path, export_result, export_error)) {
+            LOG_CRITICAL("EXPORT FAILED for {}: {}", fs_utils::path_to_utf8(source_path), export_error);
+            return 2;
+        }
+        std::string dlc_list;
+        for (const auto &id : export_result.dlc_ids)
+            dlc_list += (dlc_list.empty() ? "" : ",") + id;
+        LOG_INFO("EXPORT OK [{}] app_version={} dlc=[{}] licenses={}", export_result.title_id, export_result.app_version,
+            dlc_list, export_result.licenses.size());
+        return 0;
     }
 
     // Frontends (ES-DE etc.) don't need to pick the right flag: --bundle pointed at an archive FILE

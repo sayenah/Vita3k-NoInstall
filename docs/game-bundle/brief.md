@@ -87,6 +87,10 @@ Android: the apps-list overflow menu). All four are optional and matched to a ga
   - a `<TITLEID>.zip` / `<TITLEID>.7z` of the same;
   - loose `.pkg` files anywhere in the folder, matched by the pkg header's embedded title id.
   DLC shipped inside the game archive (an `addcont/` folder next to `app/`) is also picked up.
+  DLC dumped in NoNpDrm form (an addcont tree that still has `sce_pfs/`) is PFS-encrypted; it is
+  decrypted in place with its `work.bin` or `ux0/license` rif (`decrypt_pfs_addcont`), exactly as an
+  archive install would. A tree whose files were altered after dumping fails psvpfsparser's
+  first-sector hash match and is left encrypted (warned).
 
 - **Updates folder** (`cfg.updates_folder`). At launch, the game's update patch is decrypted and
   **merged over `<temp>/app`** (overwrite-existing). Same three layouts as DLC. Only pkgs with category
@@ -122,6 +126,17 @@ prepared by hand for `--bundle`):
 parser (`bundle::parse_manifest`) is a minimal, tolerant reader for this exact flat schema — not a
 general JSON parser (we control the emitter). Paths inside the tree resolve case-insensitively
 (`resolve_icase`) so wrong-case requests work on case-sensitive hosts, and never escape the root.
+
+### Exporting a complete bundle (`--export-bundle <game> --output <zip>`)
+
+`export_game_bundle` (`packages/src/bundle_export.cpp`) runs the same `prepare_game_tree` the play
+path uses (into `<cache>/pkgexport`), then zips the result with the game's rifs added under
+`license/<TITLEID>/` — i.e. the §4 tree plus licenses, which the decrypted-archive play path copies back
+to `ux0/license`. Before writing it checks the prepared tree against the validator's independent
+inventory (`inventory_validation_content`): the effective `app_version` must equal the selected update's,
+every expected DLC id must be present, and no addcont tree may still hold `sce_pfs/`. Any failure means
+no zip (exit 2). Output is written to `<zip>.partial` and renamed when complete; an existing output is
+never overwritten. `tools/export-library.ps1` drives it over a library.
 
 ## 5. Verified Code Map (where everything hooks)
 

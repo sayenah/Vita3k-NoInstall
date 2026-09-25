@@ -152,6 +152,10 @@ static void check_members(Config &self, const Config &rhs) {
         self.bundle_path = rhs.bundle_path;
     if (rhs.play_pkg_path.has_value())
         self.play_pkg_path = rhs.play_pkg_path;
+    if (rhs.export_bundle_path.has_value())
+        self.export_bundle_path = rhs.export_bundle_path;
+    if (rhs.export_output_path.has_value())
+        self.export_output_path = rhs.export_output_path;
     if (rhs.recompile_shader_path.has_value())
         self.recompile_shader_path = rhs.recompile_shader_path;
     if (rhs.delete_title_id.has_value())
@@ -361,6 +365,12 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->default_str({})->group("Input");
     input->add_option("--play-pkg", command_line.play_pkg_path, "Play a game without installing (unpacks to temp, deletes on exit): a NoNpDrm .pkg, or a .zip/.7z containing a .pkg or a decrypted app/ folder")
         ->default_str({})->group("Input");
+    auto input_export = input->add_option("--export-bundle", command_line.export_bundle_path, "Convert a game plus its update, DLC and licenses (from the configured folders) into one self-contained .zip, then quit")
+        ->default_str({})->group("Input");
+    auto input_output = input->add_option("--output", command_line.export_output_path, "Destination .zip for --export-bundle (never overwritten)")
+        ->default_str({})->group("Input");
+    input_export->needs(input_output);
+    input_output->needs(input_export);
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
         ->default_str({})->group("Input");
     input->add_option("--deleted-id,-d", command_line.delete_title_id, "Title ID of installed app to delete")

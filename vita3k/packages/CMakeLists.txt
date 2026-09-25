@@ -1,6 +1,7 @@
 add_library(packages STATIC
             src/archive_7z.cpp
             src/archive_read.cpp
+            src/bundle_export.cpp
             src/exfat.cpp
             src/license.cpp
             src/pkg.cpp
@@ -11,6 +12,7 @@ add_library(packages STATIC
             src/vci.cpp
             include/packages/archive_7z.h
             include/packages/archive_read.h
+            include/packages/bundle_export.h
             include/packages/exfat.h
             include/packages/license.h
             include/packages/functions.h

@@ -53,6 +53,8 @@ or deleting a game file never touches them.
 - 🔑 **License folder** — keep your `.rif` licenses in one tree (there's a
   [tool](./tools/build-license-folder.py) that builds it from NoPayStation `.tsv` files) and every
   game/update/DLC key is applied automatically.
+- 📦 **One file per game** — convert a game plus its update, DLC, and licenses into a single
+  self-contained `.zip`, then drop the loose files (see [below](#one-zip-per-game)).
 - 🔄 **Self-updating** — every Monday the fork rebases itself onto the newest official Vita3K and
   publishes a fresh build. There's also a one-click button ([how-to](./docs/game-bundle/getting-builds.md)).
 - 🖥️ **All Vita3K goodness** — this fork *adds* features; normal installs, settings, save data, and
@@ -80,6 +82,31 @@ or deleting a game file never touches them.
 ```
 Vita3K --play-pkg "D:\Games\Persona 4 Golden.zip"
 ```
+
+## One zip per game
+
+Tired of carrying a base game, an update pkg, DLC zips, and a license tree for every title? Convert
+each game once into a single zip that has everything inside it:
+
+```
+Vita3K --export-bundle "D:\Games\Muramasa Rebirth (USA).zip" --output "D:\Complete\Muramasa Rebirth (USA).zip"
+```
+
+It uses the Updates/DLCs/License folders you configured, merges the newest update into the game,
+decrypts every DLC, and packs the licenses. It never overwrites an existing file, and it **refuses to
+write the zip** if the update it found didn't apply or any DLC is missing or still encrypted — so a
+finished zip really is complete. Play it like any other game; the side folders are no longer needed
+for it.
+
+For a whole library (PowerShell 7), outputs mirror your folders and finished games are skipped on
+re-runs; per-game results go to `export-results.csv`:
+
+```
+pwsh tools/export-library.ps1 -RomsFolder "D:\Games" -OutputFolder "D:\Complete" -Vita3KExe "C:\Vita3K\Vita3K.exe"
+```
+
+Your original files are never modified. Check the CSV (and play a converted game or two) before you
+delete anything.
 
 ## ES-DE setup
 

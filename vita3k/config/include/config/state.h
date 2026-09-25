@@ -37,6 +37,9 @@ struct Config {
     std::optional<fs::path> bundle_path;
     // Path to a self-contained NoNpDrm .pkg to decrypt-to-temp and play without permanently installing.
     std::optional<fs::path> play_pkg_path;
+    // Convert a game (plus its update/DLC/licenses) into one self-contained zip at export_output_path.
+    std::optional<fs::path> export_bundle_path;
+    std::optional<fs::path> export_output_path;
     std::optional<bool> system_music;
 
     // Setting not present in the YAML file
